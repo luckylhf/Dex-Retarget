@@ -1,0 +1,20 @@
+{
+  "policy": "checked_v8_residual_budget_routing_v2",
+  "contact_repair_m": 0.0005,
+  "geometry_acceptance_m": 0.001,
+  "arm_direction_deg": 20.0,
+  "hand_axis_deg": 25.0,
+  "elbow_axis_deg": 30.0,
+  "pose_duration_s": 0.1,
+  "window_padding_s": 0.4,
+  "maximum_local_window_s": 4.0,
+  "allow_full_clip_fallback": false,
+  "maximum_v8_windows": 3,
+  "maximum_v8_frame_fraction": 0.25,
+  "minimum_v8_frame_budget": 100,
+  "maximum_pose_windows": 4,
+  "pose_iterations": 6,
+  "threshold_scope": "retargeting engineering heuristics; not hardware acceleration or anatomical ratings",
+  "maximum_collision_recovery_windows": 2,
+  "maximum_collision_recovery_frames": 100
+}

@@ -1,0 +1,227 @@
+{
+  "release": "V8_cpu_coupled_arms_20261105",
+  "package_version": "0.1.9",
+  "solver_policy": "per_axis_velocity_v8_mink_arm_recovery_v2",
+  "quality_policy": "adjacent_joint_speed_and_arm_collision_v8",
+  "implementation_patch": "cpu_mink_margin_aware_arm_selection_20261105",
+  "installed_at": "20261105_194549",
+  "code": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/Dex-SuperMimic",
+  "backup": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/Dex-Frax/outputs/v8_default_merge_20261105/before_merge.tar.gz",
+  "backup_sha256": "285fff372748059ce3110a9a6eef151d6e88c7d56cb04b52df0d334a7af685db",
+  "previous_release_receipt": "docs/releases/V8_cpu_support_before_coupled_arms_20261105.json",
+  "full_library_regression_passed": false,
+  "full_library_reconverted": false,
+  "full_clip_rerun": true,
+  "tests_passed": 111,
+  "tests_skipped": 0,
+  "validation_scope": "111 formal tests; 67 Dex-Frax tests; one full nobody BVH through default formal entry and 32-subdivision declared-pair collision scan. No full-library or dynamics validation.",
+  "full_clip_validation": {
+    "release": "V8_cpu_coupled_arms_20261105",
+    "solver_policy": "per_axis_velocity_v8_mink_arm_recovery_v2",
+    "entrypoint": "dex_supermimic.data.v8.convert default from original BVH",
+    "frames": 1158,
+    "fps": 50.0,
+    "collision_before": {
+      "policy": "mink_arm_local_recovery_v2",
+      "pair_count": 240,
+      "frames": 1158,
+      "native_colliding_frames": 68,
+      "interpolated_colliding_intervals": 69,
+      "collision_samples": 274,
+      "minimum_distance_m": -0.02612103276668605,
+      "worst": {
+        "frame": 309,
+        "fraction": 0.0,
+        "pair": [
+          "hip_pitch_l_link_collision",
+          "wrist_pitch_l_link_collision"
+        ],
+        "distance_m": -0.02612103276668605
+      },
+      "interpolation_steps": 4,
+      "scope": "arms versus torso/hips/head and opposite arm; convex geometry; not continuous collision certification"
+    },
+    "collision_after": {
+      "policy": "mink_arm_local_recovery_v2",
+      "pair_count": 240,
+      "frames": 1158,
+      "native_colliding_frames": 0,
+      "interpolated_colliding_intervals": 0,
+      "collision_samples": 0,
+      "minimum_distance_m": 0.002721836158346567,
+      "worst": {
+        "frame": 309,
+        "fraction": 0.5,
+        "pair": [
+          "hip_pitch_l_link_collision",
+          "wrist_pitch_l_link_collision"
+        ],
+        "distance_m": 0.002721836158346567
+      },
+      "interpolation_steps": 4,
+      "scope": "arms versus torso/hips/head and opposite arm; convex geometry; not continuous collision certification"
+    },
+    "windows": [
+      {
+        "start": 289,
+        "end": 331,
+        "sides": [
+          "Left"
+        ],
+        "status": "repaired",
+        "iterations": 4,
+        "minimum_m": 0.003499999538998515,
+        "interpolated_minimum_m": 0.0027218361785798905,
+        "maximum_correction_deg": 3.4491860618455066,
+        "side_selection": {
+          "policy": "collision_and_window_clearance_v2",
+          "collision_sides": [
+            "Left"
+          ],
+          "margin_added_sides": [],
+          "margin_pairs": [
+            [
+              "hip_roll_l_link_collision",
+              "wrist_pitch_l_link_collision"
+            ],
+            [
+              "hip_pitch_l_link_collision",
+              "elbow_yaw_l_link_collision"
+            ],
+            [
+              "hip_pitch_l_link_collision",
+              "wrist_pitch_l_link_collision"
+            ],
+            [
+              "hip_pitch_l_link_collision",
+              "wrist_roll_l_link_collision"
+            ]
+          ]
+        }
+      },
+      {
+        "start": 1081,
+        "end": 1158,
+        "sides": [
+          "Left",
+          "Right"
+        ],
+        "status": "repaired",
+        "iterations": 3,
+        "minimum_m": 0.0034999973551335622,
+        "interpolated_minimum_m": 0.0034964251239007847,
+        "maximum_correction_deg": 2.5372759304542885,
+        "side_selection": {
+          "policy": "collision_and_window_clearance_v2",
+          "collision_sides": [
+            "Left"
+          ],
+          "margin_added_sides": [
+            "Right"
+          ],
+          "margin_pairs": [
+            [
+              "hip_pitch_l_link_collision",
+              "elbow_yaw_l_link_collision"
+            ],
+            [
+              "hip_pitch_l_link_collision",
+              "wrist_pitch_l_link_collision"
+            ],
+            [
+              "hip_pitch_l_link_collision",
+              "wrist_roll_l_link_collision"
+            ],
+            [
+              "hip_pitch_r_link_collision",
+              "wrist_roll_r_link_collision"
+            ]
+          ]
+        }
+      }
+    ],
+    "dense_scan_32": {
+      "policy": "mink_arm_local_recovery_v2",
+      "pair_count": 240,
+      "frames": 1158,
+      "native_colliding_frames": 0,
+      "interpolated_colliding_intervals": 0,
+      "collision_samples": 0,
+      "minimum_distance_m": 0.00271429474877465,
+      "worst": {
+        "frame": 309,
+        "fraction": 0.4375,
+        "pair": [
+          "hip_pitch_l_link_collision",
+          "wrist_pitch_l_link_collision"
+        ],
+        "distance_m": 0.00271429474877465
+      },
+      "interpolation_steps": 32,
+      "scope": "arms versus torso/hips/head and opposite arm; convex geometry; not continuous collision certification"
+    },
+    "same_as_old_v8": {
+      "root_pos": true,
+      "root_rot": true,
+      "non_arm_joints": true,
+      "before_tail_join": true
+    },
+    "status": "accepted_kinematic_candidate",
+    "quality_flags": [],
+    "speed_violations": 0,
+    "source_sha256": "668caeefb9ff2dfd77535c491ed0ad15857f159d0af2190b0f70292c4b3a65df",
+    "output_sha256": "7ae9af3f6e667e54a9477b31a19c7522a375e2404fd15d571ad6f786ab7eaebb",
+    "original_unchanged_sha256": "4480e18eee01d2d12759a7651afde13d3f9ede09df1705b1811648240c55ceee",
+    "elapsed_s": 119.53801304200897,
+    "full_library_validation": false,
+    "dynamic_validation": false,
+    "hardware_validation": false
+  },
+  "validation_report": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/Dex-Frax/outputs/v8_default_merge_20261105/formal_default/validation.json",
+  "historical_collision_stage_regression": {
+    "motions": 21,
+    "A": 9,
+    "B": 12,
+    "native_collision_frames_before": 1356,
+    "native_collision_frames_after": 1016,
+    "non_arm_identical": true,
+    "new_speed_violations": 0,
+    "implementation_patch": "cpu_mink_arm_collision_20261105"
+  },
+  "files": {
+    "README.md": "413ea291cbd23168a854a8b4d107d5cace4dc41d318b225275b3d5f764be6bee",
+    "THIRD_PARTY.md": "2effc7fcb0b809c67d31511b907d9253482c2f6659cf413d52201dd5bc327768",
+    "docs/RETARGET_V8.md": "614389bf93fc8b27e4c2f8df07e0af9f2d2f33884c171ebe32335ecf9e4aef53",
+    "docs/V8_COUPLED_ARMS_20261105.md": "ba6ab05e84020a248c9b5e1175dd91cadff414507077679d50ec70f178581175",
+    "pyproject.toml": "f19bee8af2242a7f728f2ca3d8310b3127f549b6f54e9dae19bca2eba4a9be69",
+    "src/dex_supermimic/data/prepare.py": "ebb4d450414ef082369fcb1d27081c3fc6f7d945408f5eaff56b8b9c725ed3d8",
+    "src/dex_supermimic/data/quality_v8.py": "9d0af25b825e77a8c8d69eaf9896a26eba1bf8677d92ef02a663c9027bd8c02c",
+    "src/dex_supermimic/data/retarget.py": "bcdab336a81a5fa8551760f148d4a3a2cd99cbfdde76d1a2eefe6996c644547a",
+    "src/dex_supermimic/data/v8/__init__.py": "3eaff18289847fde888884300b462b1677007877eea060d6e5d225e3990188f7",
+    "src/dex_supermimic/data/v8/audit.py": "25ac5c9d5b1a783cca7e46e087e4f68d5eacfbca7ac81206d48bd6505a0fb73a",
+    "src/dex_supermimic/data/v8/config.json": "9ac06b3c2f33c82745f8f5c97bb42bc3c0fccfc9fa2b0242287255226061133d",
+    "src/dex_supermimic/data/v8/contact_solver.py": "2b6e3c2240de135436ba4aef444e303d84340bc2ecdf510b5a84c6860fa053e2",
+    "src/dex_supermimic/data/v8/convert.py": "f448e482b7eca4c03fd9308d282b1404e3fec779c32509a73f05ccbf0fb8d045",
+    "src/dex_supermimic/data/v8/provenance.json": "eb3f5061e724140f817de21782f4e313bfdf1606f72032d102df8f12ac3bd71f",
+    "src/dex_supermimic/data/v8/self_collision.py": "87c6bfde84a7ba27c14e54a2a8d71a1d3a1f1ccfda3dd115b7e629203e8d9a92",
+    "src/dex_supermimic/data/v8/solver.py": "aed23c7345f69f2fcd25f18b5e7ed60785c19d6d93e6f89979aa21f5a9a5eaf8",
+    "src/dex_supermimic/data/v8/support_acceptance.py": "2094d1160759b477fb07c486574cf773ecc5d6f17946f138834d63a4d377fccf",
+    "src/dex_supermimic/data/v8/support_fast.py": "d5077f59e18f7ad68f4df267802cb5029263b4844808c458fffeeff8fcb3df4e",
+    "tests/test_review_regressions.py": "9a5e622c89cc4d2135c193a77c6bdc2255829a95f1783a91ef325cf8f632ced2",
+    "tests/test_self_collision.py": "3899d4c00c758357f59e355c97bba938da647ee4f716259064877958aba4cff0",
+    "tests/test_support_acceptance.py": "0781220b709720731faa37835516cd2c7ec65befcae23936012362dc13c3d246",
+    "tests/test_v8_acceptance.py": "f8eee1fd19db81e4cab494aa183d3304a8605eece2fc9fbfc20741c750fbda70"
+  },
+  "unchanged_rule_hashes": {
+    "src/dex_supermimic/data/v8/anatomy.py": "a2a432018d746cd137eb4cee78a1c31806bc6741e3050f5cf8046c44fe068f54",
+    "src/dex_supermimic/data/v8/arms.py": "7caf8d2048262129a3f970de0c67fb7059afe8c41ffcdd87320050a36428419b",
+    "src/dex_supermimic/data/v8/robot.py": "70f53be6bd2b1cdf0ee1bfd7f844768e3073fe63e0d61785a909a981c161ce84",
+    "src/dex_supermimic/data/v8/contacts.py": "cb9b6680d5bd29da19b40c8c60dfbb2e3ec8a9d60f9231f26182f705f166eea5",
+    "src/dex_supermimic/data/v8/task_weights.py": "b6aefdb2d208b7ad6c83c0159bc5dfd547926a564a62901d756da8a657911cbc",
+    "src/dex_supermimic/data/v8/trajectory.py": "bd35e5c06807f61fc3e79090b7293e9f58bad3d4a085bd7e800072739d1d873a"
+  },
+  "support_acceptance_m": 0.001,
+  "complete": true,
+  "remote_updated": false,
+  "git_pushed": false
+}

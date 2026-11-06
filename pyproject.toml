@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dex-frax"
+version = "0.8.1"
+description = "Dex motion retargeting with frax IK and the November 5 V8 contact pipeline"
+requires-python = ">=3.11,<3.13"
+dependencies = ["frax[ik]==0.2.0", "numpy>=2,<3", "scipy>=1.15,<2", "mujoco==3.16.0", "osqp>=1,<2", "mink==1.4.0", "qpsolvers==4.12.0"]
+
+[project.optional-dependencies]
+smplx = ["torch>=2.6", "smplx==0.1.28"]
+test = ["pytest>=8"]
+preview = ["imageio", "imageio-ffmpeg", "pillow"]
+
+[project.scripts]
+dex-frax = "dex_frax.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dex_frax = ["*.json"]
+"dex_frax.v8" = ["*.json", "reference/*.json", "reference/*.bvh", "reference/GMR_LICENSE", "reference/SOURCE_GEOMETRY.md", "reference/NVIDIA/LICENSE", "reference/NVIDIA/soma_retargeter/assets/soma/contact_processing/*.json"]
+
+[tool.setuptools.exclude-package-data]
+"dex_frax.v8" = ["reference/lafan1_surfaces.json", "reference/soma_surfaces.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

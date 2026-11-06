@@ -1,0 +1,13 @@
+{
+  "minimum_frames": 33,
+  "joint_limit_tolerance_deg": 0.0001,
+  "root_speed_m_s": 8.0,
+  "root_angular_speed_rad_s": 8.0,
+  "minimum_sole_m": -0.02,
+  "stationary_floating_seconds": 0.5,
+  "root_orientation_max_deg": 5.0,
+  "torso_up_max_deg": 45.0,
+  "torso_orientation_p95_deg": 35.0,
+  "arm_direction_p95_deg": 20.0,
+  "hand_axis_p95_deg": 25.0
+}

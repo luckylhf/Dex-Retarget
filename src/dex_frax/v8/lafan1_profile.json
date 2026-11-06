@@ -1,0 +1,31 @@
+{
+  "id": "lafan1_original_bvh_official_reference_surfaces_v1",
+  "source": "Ubisoft La Forge Animation Dataset (LAFAN1), original BVH",
+  "orientation_reference": "https://github.com/YanjieZe/GMR/blob/master/general_motion_retargeting/utils/lafan1.py",
+  "offset_reference": "https://github.com/YanjieZe/GMR/blob/master/general_motion_retargeting/ik_configs/bvh_lafan1_to_g1.json",
+  "orientation_joint_suffix": "Toe",
+  "forward_in_toe": [
+    1,
+    0,
+    0
+  ],
+  "sole_up_in_toe": [
+    0,
+    1,
+    0
+  ],
+  "expected_ankle_to_toe_m": 0.173,
+  "bone_length_tolerance_m": 0.001,
+  "scene_ground": {
+    "height_m": 0.0,
+    "normal": [
+      0,
+      0,
+      1
+    ],
+    "method": "source_coordinate_convention",
+    "reference": "GMR bvh_lafan1_to_g1 ground_height=0; not re-estimated from the motion",
+    "measured": false
+  },
+  "surface_profile": "reference/lafan1_surfaces.json"
+}

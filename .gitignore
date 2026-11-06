@@ -1,0 +1,20 @@
+.venv/
+.DS_Store
+__pycache__/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+outputs/
+.cache/
+# Local StanfordASL/frax upstream checkout; install locally, never commit here.
+/Dex-StanfordASL-frax/
+# Private regression BVHs, manifests, checkpoints and results. Never publish.
+/regression_local/
+# Licensed human reference tables are local inputs, not robot assets.
+src/dex_frax/v8/reference/lafan1_surfaces.json
+src/dex_frax/v8/reference/soma_surfaces.json
+
+# Remote frozen runtime deployments, not source distribution.
+/releases/
+/next

@@ -1,0 +1,76 @@
+{
+  "contact": {
+    "speed_enter": 0.1,
+    "speed_leave": 0.2,
+    "jerk_window_s": 0.08,
+    "stable_duration_s": 0.1,
+    "transition_s": 0.1,
+    "height_tolerance_m": 0.035,
+    "flatness_deg": 18.0,
+    "height_spread_m": 0.05,
+    "max_anchor_excursion_m": 0.035,
+    "height_spread_reference": "NVIDIA soma-retargeter plant_subsegment.max_height_spread=0.05m; both endpoints must still pass the existing scene-ground and stability tests"
+  },
+  "solver": {
+    "max_iterations": 30,
+    "root_position": 6.0,
+    "torso_orientation": 3.0,
+    "leg_direction": 1.0,
+    "foot_position": 30.0,
+    "contact_position": 180.0,
+    "foot_orientation": 3.0,
+    "ground_penalty": 150.0,
+    "arm_direction": 4.0,
+    "hand_direction": 3.0,
+    "hand_width": 2.0,
+    "forearm_twist": 0.35,
+    "joint_velocity": 0.12,
+    "joint_acceleration": 0.18,
+    "root_velocity": 25.0,
+    "root_acceleration": 45.0,
+    "numerical_joint_speed_deg_s": 720.0,
+    "wrist_rest": 0.08,
+    "hip_yaw_rest": 0.12,
+    "elbow_bend": 0.65,
+    "elbow_axis": 1.6,
+    "wrist_soft_limit": 0.7,
+    "defer_arm_speed_to_final": true,
+    "body_contact_position": 28.57142857142857,
+    "body_contact_loss": "bounded_when_feet_planted",
+    "arm_ground_penalty": 28.57142857142857,
+    "body_contact_weight_reference": "Inverse source contact-height tolerance. When feet are planted, uncertain additional body-height hints use a bounded residual at that same tolerance scaled to robot metres. Free-foot body support retains the linear task. Hard mesh clearance, planted-foot XYZ, angle and speed bounds remain separate.",
+    "support_refinement": "hybrid_cpu_v1",
+    "support_light_iterations": 6,
+    "support_fast_bypass": true,
+    "support_geometric_seed": false,
+    "arm_adaptive_candidates": true,
+    "arm_event_tracking": true,
+    "support_qp_scaling": "objective"
+  },
+  "anatomy": {
+    "reference": "NASA OCHMO-STD-100.1A Rev A, page 82",
+    "url": "https://www.nasa.gov/wp-content/uploads/2023/04/ochmo-std-100.1a.pdf#page=82",
+    "soft_deg": {
+      "radial": 15,
+      "ulnar": 30,
+      "flexion": 70,
+      "extension": 65
+    },
+    "maximum_deg": {
+      "radial": 20,
+      "ulnar": 45,
+      "flexion": 80,
+      "extension": 85
+    }
+  },
+  "self_collision": {
+    "enabled": true,
+    "margin_m": 0.0035,
+    "detection_m": 0.08,
+    "penetration_tolerance_m": 1e-05,
+    "padding_s": 0.32,
+    "max_window_s": 3.0,
+    "max_iterations": 24,
+    "interpolation_steps": 4
+  }
+}

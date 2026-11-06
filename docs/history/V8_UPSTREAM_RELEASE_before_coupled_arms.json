@@ -1,0 +1,77 @@
+{
+  "release": "V8_cpu_support_20261105",
+  "solver_policy": "per_axis_velocity_v8_mink_arm_recovery_v1",
+  "quality_policy": "adjacent_joint_speed_and_arm_collision_v8",
+  "implementation_patch": "cpu_mink_support_acceptance_1mm_20261105",
+  "installed_at": "20261105_163251",
+  "code": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/Dex-SuperMimic",
+  "backup": "/Users/loong/Documents/ChatGPT/SuperMimic研究/V8_支撑验收1mm_20261105/备份/支撑验收1mm修改前_20261105_162814.tar.gz",
+  "backup_sha256": "30d9ed1cf719282b7959864c279200b9fe26aa0bca930710add9d138a02e6bc1",
+  "previous_install_backup": "/Users/loong/Documents/ChatGPT/SuperMimic研究/V8_Mink正式合入_20261105/备份/Mink避碰合入前_20261105_153952.tar.gz",
+  "full_library_regression_passed": false,
+  "full_library_reconverted": false,
+  "full_clip_rerun": false,
+  "tests_passed": 109,
+  "validation_scope": "109 tests without skips; final support acceptance only, no motion/library rerun; prior collision-stage results retained as historical evidence",
+  "collision_stage_regression": {
+    "motions": 21,
+    "A": 9,
+    "B": 12,
+    "native_collision_frames_before": 1356,
+    "native_collision_frames_after": 1016,
+    "non_arm_identical": true,
+    "new_speed_violations": 0,
+    "implementation_patch": "cpu_mink_arm_collision_20261105"
+  },
+  "window_report": "/Users/loong/Documents/ChatGPT/SuperMimic研究/V8_Mink正式合入_20261105/regression/quality_summary.json",
+  "files": {
+    "README.md": "055c4771a91098374f3cc6dc46c3d673be4a2461fad8888ae0973d94adfd4430",
+    "THIRD_PARTY.md": "2effc7fcb0b809c67d31511b907d9253482c2f6659cf413d52201dd5bc327768",
+    "docs/RETARGET_V8.md": "81c0f73f4497a2f74a54f23f95ee99c43717a3534575d1a54f5dad98924f5ed1",
+    "pyproject.toml": "da4ee80720f4a44771ba91f2ed93cb9de9a251f627ae933716b44ce0c3a1ab9e",
+    "src/dex_supermimic/data/prepare.py": "ebb4d450414ef082369fcb1d27081c3fc6f7d945408f5eaff56b8b9c725ed3d8",
+    "src/dex_supermimic/data/quality_v8.py": "9d0af25b825e77a8c8d69eaf9896a26eba1bf8677d92ef02a663c9027bd8c02c",
+    "src/dex_supermimic/data/retarget.py": "9689527777ac28e31de6a117843bd01eabaffe978cb1e1fe381051b18c1f13a9",
+    "src/dex_supermimic/data/v8/audit.py": "25ac5c9d5b1a783cca7e46e087e4f68d5eacfbca7ac81206d48bd6505a0fb73a",
+    "src/dex_supermimic/data/v8/config.json": "9ac06b3c2f33c82745f8f5c97bb42bc3c0fccfc9fa2b0242287255226061133d",
+    "src/dex_supermimic/data/v8/convert.py": "f448e482b7eca4c03fd9308d282b1404e3fec779c32509a73f05ccbf0fb8d045",
+    "src/dex_supermimic/data/v8/provenance.json": "d75a2a12c587549fe326139a344cc80269b6b98de9948fe430d94c896177135b",
+    "src/dex_supermimic/data/v8/self_collision.py": "bf7c4108969b45f22214dd50934e9e953296b651de8db01f21dca96c9e9c10e7",
+    "tests/test_review_regressions.py": "9a5e622c89cc4d2135c193a77c6bdc2255829a95f1783a91ef325cf8f632ced2",
+    "tests/test_self_collision.py": "75c2e4192b97ff2239d511b988a83d9d38f0d04290f9f141e5ea11f0f29a7893",
+    "tests/test_v8_acceptance.py": "f8eee1fd19db81e4cab494aa183d3304a8605eece2fc9fbfc20741c750fbda70",
+    "tests/test_support_acceptance.py": "0781220b709720731faa37835516cd2c7ec65befcae23936012362dc13c3d246",
+    "src/dex_supermimic/data/v8/solver.py": "aed23c7345f69f2fcd25f18b5e7ed60785c19d6d93e6f89979aa21f5a9a5eaf8",
+    "src/dex_supermimic/data/v8/contact_solver.py": "2b6e3c2240de135436ba4aef444e303d84340bc2ecdf510b5a84c6860fa053e2",
+    "src/dex_supermimic/data/v8/support_acceptance.py": "2094d1160759b477fb07c486574cf773ecc5d6f17946f138834d63a4d377fccf",
+    "src/dex_supermimic/data/v8/support_fast.py": "d5077f59e18f7ad68f4df267802cb5029263b4844808c458fffeeff8fcb3df4e",
+    "src/dex_supermimic/data/v8/__init__.py": "3eaff18289847fde888884300b462b1677007877eea060d6e5d225e3990188f7"
+  },
+  "unchanged_rule_hashes": {
+    "src/dex_supermimic/data/v8/anatomy.py": "a2a432018d746cd137eb4cee78a1c31806bc6741e3050f5cf8046c44fe068f54",
+    "src/dex_supermimic/data/v8/arms.py": "7caf8d2048262129a3f970de0c67fb7059afe8c41ffcdd87320050a36428419b",
+    "src/dex_supermimic/data/v8/robot.py": "70f53be6bd2b1cdf0ee1bfd7f844768e3073fe63e0d61785a909a981c161ce84",
+    "src/dex_supermimic/data/v8/contacts.py": "cb9b6680d5bd29da19b40c8c60dfbb2e3ec8a9d60f9231f26182f705f166eea5",
+    "src/dex_supermimic/data/v8/task_weights.py": "b6aefdb2d208b7ad6c83c0159bc5dfd547926a564a62901d756da8a657911cbc",
+    "src/dex_supermimic/data/v8/trajectory.py": "bd35e5c06807f61fc3e79090b7293e9f58bad3d4a085bd7e800072739d1d873a"
+  },
+  "distribution_specific_skips": [],
+  "complete": true,
+  "support_acceptance_m": 0.001,
+  "preserved_preexisting_documentation_changes": {
+    "THIRD_PARTY.md": {
+      "previous_receipt_sha256": "f03f591851e44e67e76420837aae85c976541f6bee3d84f4145d1f37951d3555",
+      "current_sha256": "2effc7fcb0b809c67d31511b907d9253482c2f6659cf413d52201dd5bc327768"
+    }
+  },
+  "metadata_cleanup": {
+    "at": "20261105_163558",
+    "backup": "/Users/loong/Documents/ChatGPT/SuperMimic研究/V8_版本配置清理_20261105/清理前_20261105_163558.tar.gz",
+    "removed": [
+      "v8.__version__=0.7.0",
+      "v8/config.json:fps=60.0"
+    ],
+    "solver_behavior_changed": false,
+    "validation": "Config equality after removing unused fps; import and existing entry checks recorded separately."
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "date": "2026-11-05",
+  "tests_passed": 65,
+  "tests_skipped": 0,
+  "wheel_built": true,
+  "wheel_import_verified": true,
+  "full_library_validation": false,
+  "dynamic_validation": false,
+  "hardware_validation": false,
+  "preview_pngs_inspected": [
+    "nobody_comparison_0000.png",
+    "nobody_comparison_0578.png",
+    "nobody_comparison_1156.png",
+    "nobody_detail_1.12s.png",
+    "nobody_detail_14.84s.png"
+  ],
+  "files": {
+    "dist/dex_frax-0.1.0-py3-none-any.whl": "cd4fd6b4e5c02b97450907d58a172c2d82b821a26266e4e0c478041e5accea15",
+    "outputs/nobody_comparison.json": "d2bbaffbadd7b030fd1b71e9e79bc79e6a8e0f7df926d91e7b3cdd0eea6bdc70",
+    "outputs/nobody_comparison.mp4": "0f9545a3e9fa602b8567d3e4f7b0ad87b43c4f8dc867463e252ee6b9b402a3f9",
+    "outputs/nobody_comparison.gif": "80528efbf1b0f04e1d47b49b6edff6b2c0aea743a7b2cc8003751ebb239671bb"
+  },
+  "accepted_export_interface": {
+    "frames": 50,
+    "root_joint_roundtrip_exact": true,
+    "scope": "development interface only; full nobody still review"
+  },
+  "dependency_check": "40 packages compatible",
+  "asset_files_verified": 127
+}

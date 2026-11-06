@@ -1,0 +1,56 @@
+[
+  {
+    "file": "1013_nobody_chr01.bvh",
+    "source": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/备份/dance-nobody 素材/1013_nobody_chr01.bvh",
+    "sha256": "41ac9f97b6eeb1e8ad1bddb0f408aa2600a1f9530b2033a44830e2f3836c91f0",
+    "bytes": 7337376
+  },
+  {
+    "file": "nobody_without_calibration.bvh",
+    "source": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/备份/dance-nobody 素材/1013_nobody_chr01_converted/nobody_without_calibration.bvh",
+    "sha256": "668caeefb9ff2dfd77535c491ed0ad15857f159d0af2190b0f70292c4b3a65df",
+    "bytes": 7334124
+  },
+  {
+    "file": "nobody.pkl",
+    "source": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/备份/dance-nobody 素材/1013_nobody_chr01_converted/nobody.pkl",
+    "sha256": "651062a38ea58d95144969ef6e3f5360b4a0d6735b40865548c67837b69a8462",
+    "bytes": 602007
+  },
+  {
+    "file": "nobody_robot.npz",
+    "source": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/备份/dance-nobody 素材/1013_nobody_chr01_converted/nobody_robot.npz",
+    "sha256": "6cb25dc7dd3f12e1d5c877fa8a696ee986f2fb1d2e00fb10c6af34b09fb3ffd3",
+    "bytes": 2626144
+  },
+  {
+    "file": "reference.npz",
+    "source": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/备份/dance-nobody 素材/1013_nobody_chr01_converted/reference.npz",
+    "sha256": "57d5da388283bb6b346631d64c70e467e32aba63cdbcc85ab6c144f6e2c47b0a",
+    "bytes": 1632435
+  },
+  {
+    "file": "preprocessing.json",
+    "source": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/备份/dance-nobody 素材/1013_nobody_chr01_converted/records/preprocessing.json",
+    "sha256": "5330005de29e1d4878eab0c5dcfba16932f77e1d6ece916e3fcc19eb93514204",
+    "bytes": 457
+  },
+  {
+    "file": "input_manifest.json",
+    "source": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/备份/dance-nobody 素材/1013_nobody_chr01_converted/records/input_manifest.json",
+    "sha256": "2c1ea8f3709a898698596ef6324a3b11b67a1ffb4ab9245f6fe70bd74e9f2fa7",
+    "bytes": 430
+  },
+  {
+    "file": "nobody.ik.json",
+    "source": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/备份/dance-nobody 素材/1013_nobody_chr01_converted/records/nobody.ik.json",
+    "sha256": "bd83b8c758c69af73ad36f9bf42157a46b247143f016b0b25b69b76d0d9c8855",
+    "bytes": 2749
+  },
+  {
+    "file": "previous_conversion_README.txt",
+    "source": "/Users/loong/资料/8、工具链及二开/ToolChains/GTM/Dex/Dex-SuperMimic/备份/dance-nobody 素材/1013_nobody_chr01_converted/README.txt",
+    "sha256": "c3150c04afde8f0a908ee6bea1e37f5eb069ff66d40fd5145d3a178937d4a81c",
+    "bytes": 3328
+  }
+]
