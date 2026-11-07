@@ -296,7 +296,7 @@ def test_long_v8_cannot_consume_blocked_short_frax_budget(setup):
     assert [x[0] for x in FakeSlot.calls[:2]]==['easy','hybrid']
 
 
-def test_dynamic_cpu_drop_keeps_inflight_work_and_recovers(setup,monkeypatch):
+def test_external_cpu_load_does_not_reduce_full_capacity_dispatch(setup,monkeypatch):
     from dex_frax import dynamic_resources
     setup.resource_mode='dynamic';setup.memory_target_percent=90.;setup.memory_reserve_gib=None
     class Cpu:
@@ -318,6 +318,9 @@ def test_dynamic_cpu_drop_keeps_inflight_work_and_recovers(setup,monkeypatch):
     assert [r['status'] for r in result]==['accepted','accepted','accepted','review','input_error']
     state=json.loads((setup.output/'batch.json').read_text())
     assert state['resources']['cpu_admission']['preserved_inflight']
+    assert Slow.peak==5  # All five available jobs launch despite a suggested 0/2-slot CPU target.
+    assert state['resources']['cpu_admission']['target_workers']==32
+    assert state['resources']['cpu_admission']['external_load_control'] is False
     assert not any(a['status']=='interrupted' for r in result for a in r['attempts'])
 
 

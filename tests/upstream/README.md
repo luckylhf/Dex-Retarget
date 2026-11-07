@@ -3,3 +3,6 @@ Dex-SuperMimic V8 release. Imports point to dex_frax and its bundled assets.
 The SuperMimic training-loader test at the end of test_self_collision.py is
 excluded because that training system is not part of this converter.
 No claim is made to have run the entire upstream SuperMimic test suite.
+Three source-surface tests require the separately licensed LAFAN/SOMA reference
+tables described in docs/INPUTS.md. They explicitly skip when those tables are
+absent and run normally when the tables are supplied.

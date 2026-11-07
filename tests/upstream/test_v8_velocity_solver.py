@@ -6,6 +6,22 @@ from dex_frax.v8.trajectory import project_velocity
 from dex_frax.quality_v8 import adjacent_speed_report
 
 
+def require_reference_surface(name):
+    from dex_frax.v8.source import REFERENCE
+    if not (REFERENCE / name).is_file():
+        pytest.skip(f'Licensed reference table {name} required; see docs/INPUTS.md')
+
+
+@pytest.fixture
+def lafan_surface():
+    require_reference_surface('lafan1_surfaces.json')
+
+
+@pytest.fixture
+def soma_surface():
+    require_reference_surface('soma_surfaces.json')
+
+
 def test_step_uses_named_motor_limits_and_retains_numerical_ceiling():
     r=Robot.__new__(Robot)
     r.speed_limits=np.array([7.,11.1,16.])
@@ -67,7 +83,7 @@ def test_local_review_finds_large_short_loss_hidden_by_whole_clip_p95():
     assert compare_local_errors(old,small,50.)['material_window_count']==0
 
 
-def test_fixed_source_foot_profile_needs_no_standing_or_ground_observation():
+def test_fixed_source_foot_profile_needs_no_standing_or_ground_observation(lafan_surface):
     from types import SimpleNamespace
     from scipy.spatial.transform import Rotation
     from dex_frax.v8.source_profile import lafan_foot
@@ -128,7 +144,7 @@ def test_limb_contact_surfaces_cover_the_limb_not_only_its_joint_motor():
             assert coverage>.6*length,(side,name,coverage,length)
 
 
-def test_standing_foot_anchors_survive_and_whole_clip_flight_is_not_grounded():
+def test_standing_foot_anchors_survive_and_whole_clip_flight_is_not_grounded(soma_surface):
     import json
     from pathlib import Path
     from dex_frax.v8.source import adapt,REFERENCE
@@ -241,7 +257,7 @@ def test_contact_hand_priority_keeps_aerial_weights_and_uses_existing_arm_scale(
     np.testing.assert_allclose([hand_weights(cfg,side,i) for i in range(3)],[[3,2],[3.5,3],[4,4]])
 
 
-def test_arm_floor_and_contact_rows_have_correct_real_model_derivatives():
+def test_arm_floor_and_contact_rows_have_correct_real_model_derivatives(soma_surface):
     import json
     from pathlib import Path
     from scipy.spatial.transform import Rotation

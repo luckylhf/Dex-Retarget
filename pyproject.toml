@@ -5,7 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dex-frax"
 version = "0.8.1"
-description = "Dex motion retargeting with frax IK and the November 5 V8 contact pipeline"
+description = "Retarget BVH and SMPL-X human motion to 50 Hz Dex robot references"
+readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = ["frax[ik]==0.2.0", "numpy>=2,<3", "scipy>=1.15,<2", "mujoco==3.16.0", "osqp>=1,<2", "mink==1.4.0", "qpsolvers==4.12.0"]
 

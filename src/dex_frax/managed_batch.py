@@ -30,6 +30,7 @@ def child(connection,options):
     from . import cli,model_cache
     cli._FROZEN_IDENTITY=options['identity']
     model_cache.enable(options['model'])
+    if options.get('scheduler_resume'):enable_scheduler_initial_reuse()
     _worker(connection)
 
 class Slot(Worker):
@@ -38,13 +39,16 @@ class Slot(Worker):
     @property
     def pid(self):return self.process.pid if self.process is not None else None
     def start(self,job,timeout):
-        if self.jobs>=64:self.close();self.jobs=0
         if self.process is None or not self.process.is_alive():
             self.close();ctx=multiprocessing.get_context('spawn');self.connection,child_conn=ctx.Pipe()
             self.process=ctx.Process(target=child,args=(child_conn,self.options),daemon=True)
             self.process.start();child_conn.close()
         self.started=time.monotonic();self.timeout=timeout;self.connection.send(job)
         self.phase_peaks={};self.telemetry=dict(phase='starting',stage='loading',compile_possible=job['arguments']['mode']!='v8' and not job['arguments'].get('require_initial_reuse',False),cache_state=self.telemetry.get('cache_state','pure'))
+    def close(self):
+        super().close()
+        self.jobs=0;self.telemetry={};self.phase_peaks={}
+
     def poll(self):
         while self.connection.poll(0):
             try:
@@ -100,6 +104,39 @@ def scheduler_update(original,snapshot):
     if not changed.issubset({'managed_batch.py','resources.py'}):
         raise ValueError('Resume runtime, assets or solver implementation changed')
     return {k:dict(before=before.get(k),after=after.get(k)) for k in sorted(changed)}
+
+
+def enable_scheduler_initial_reuse():
+    """Worker-local adapter for an explicitly authorized scheduler-only resume.
+
+    The conversion/export identity remains current. Only the reader's comparison
+    identity is adapted after the same two-file check used by restore; all source,
+    model, solver, parameter, target and artifact checks still run unchanged.
+    """
+    from . import initial_reuse
+    base=initial_reuse.ReusedInitial
+    if getattr(base,'scheduler_resume_adapter',False):return
+    class SchedulerInitial(base):
+        scheduler_resume_adapter=True
+        def __init__(self,directory,identity,fallback,strict=False):
+            super().__init__(directory,identity,fallback,strict)
+            self.scheduler_changes={}
+            try:
+                previous=json.loads((Path(directory)/'identity.json').read_text())
+                keys=('converter','version','implementation','frax_implementation','assets','runtime')
+                changes=scheduler_update({k:previous[k] for k in keys},{k:identity[k] for k in keys})
+            except (OSError,ValueError,KeyError,TypeError):
+                return  # Original strict reader rejects the mismatch.
+            if changes:
+                self.identity=copy.deepcopy(identity)
+                self.identity['implementation']=copy.deepcopy(previous['implementation'])
+                self.scheduler_changes=changes
+        def __call__(self,*args,**kwargs):
+            result=super().__call__(*args,**kwargs)
+            if self.scheduler_changes and self.report.get('initial_reuse',{}).get('used'):
+                self.report['initial_reuse']['scheduler_compatibility']=self.scheduler_changes
+            return result
+    initial_reuse.ReusedInitial=SchedulerInitial
 
 def restore(args,out,content,cases,snapshot):
     """Resume only verified attempts; solver or asset changes require a new run."""
@@ -176,8 +213,9 @@ def _run(args,slot_factory,monitor):
         compile_extra_gib=max(0,args.worker_peak_gib-getattr(args,'worker_resident_gib',args.worker_peak_gib)),
         peak_bytes_per_output_frame=admission.value['stages']['hybrid']['bytes_per_output_frame'],start_method='spawn',cgroup_limit_bytes=snap['cgroup_limit'],
         frax_peak_bytes_per_output_frame=admission.value['stages']['frax']['bytes_per_output_frame'],
-        scheduling='strict_priority_continuous_v4',stage_barriers=False,long_seconds=60.,
+        scheduling='strict_priority_warm_workers_v5',stage_barriers=False,long_seconds=60.,
         identity='frozen before workers, recomputed after workers',model='verified MJB, reused per spawn worker; no cross-process fork sharing')
+    pool_stats=Counter()
     stop_path=out/'STOP'
     previous_handlers={}
     def on_signal(*_):
@@ -187,11 +225,18 @@ def _run(args,slot_factory,monitor):
 
     def save(full=True):
         nonlocal last,last_checkpoint
+        policy['worker_pool']=dict(policy='retain_warm_until_actual_pressure_v1',fixed_job_recycle=False,
+            counters=dict(pool_stats),resident_idle=sum(s not in active and bool(s.pid) for s in slots),
+            maximum_jobs_in_resident=max((getattr(s,'jobs',0) for s in slots),default=0))
         policy['resource_policy']=admission.report()
         policy['workers']=admission.value['workers']
         policy['memory_reserve_gib']=reserve/res.GIB
         policy['memory_learning']=learning.report()
-        if cpu_admission:policy['cpu_admission']=cpu_admission.report()
+        if cpu_admission:
+            measured=cpu_admission.report()
+            policy['cpu_admission']=dict(measured,load_based_target_ignored=measured.get('target_workers'),
+                target_workers=min(admission.value['workers'],nworkers),reason='full_available_cpu',
+                external_load_control=False)
         policy.update(frax_resident_base_gib=admission.value['stages']['frax']['base_gib'],
             hybrid_resident_base_gib=admission.value['stages']['hybrid']['base_gib'],
             v8_worker_peak_base_gib=admission.value['stages']['v8']['base_gib'],
@@ -252,7 +297,8 @@ def _run(args,slot_factory,monitor):
         model=prepare(snapshot['assets'],res.state_root()/'models');res.release_memory()
         cpus=res.cpu_order() if hasattr(os,'sched_getaffinity') else [None]*nworkers
         cache_dir=res.state_root()/'jax_cache';cache_dir.mkdir(parents=True,exist_ok=True,mode=0o700)
-        options=dict(identity=snapshot,model=model,compile_dir=str(res.state_root()/'compiler'),persistent_cache_dir=str(cache_dir),block_frames=getattr(args,'ik_block_frames',128),dynamic=dynamic)
+        options=dict(identity=snapshot,model=model,compile_dir=str(res.state_root()/'compiler'),persistent_cache_dir=str(cache_dir),block_frames=getattr(args,'ik_block_frames',128),dynamic=dynamic,
+            scheduler_resume=bool(resume and os.environ.get('DEX_FRAX_ALLOW_SCHEDULER_RESUME')=='1'))
         queue=[];sequence=0
         def enqueue(index,mode):
             nonlocal sequence
@@ -270,8 +316,10 @@ def _run(args,slot_factory,monitor):
             phase=next(iter(modes)) if len(modes)==1 else 'mixed'
             snap=monitor()
             reserve=res.host_reserve(args,snap)
-            cpu_limit=cpu_admission.sample([os.getpid()]+[s.pid for s in slots]) if cpu_admission else nworkers
-            dispatch_limit=min(admission.value['workers'],cpu_limit)
+            # CPU load is telemetry only. Fill every permitted slot; the OS
+            # schedules competing work. Host/cgroup memory admission still gates starts.
+            if cpu_admission:cpu_admission.sample([os.getpid()]+[s.pid for s in slots])
+            dispatch_limit=min(admission.value['workers'],nworkers)
             if stopped or stop_path.exists():state='interrupted';abort('interrupted');break
             if time.monotonic()-started>=args.budget:state='budget_exhausted';abort('budget_exhausted');break
             free=res.shutil.disk_usage(out).free
@@ -299,11 +347,16 @@ def _run(args,slot_factory,monitor):
                 learning.observe(slot,item,usage.get(slot,0))
                 item['peak']=learning.predict(item['mode'],cases[item['index']]['source'],getattr(slot,'telemetry',{}).get('cache_state','pure'),frames[item['index']],admission,stage=getattr(slot,'telemetry',{}).get('stage'),reuse=item.get('reuse',False))
             snap=monitor()
+            victim=res.reclaim_idle(slots,active,usage,snap,reserve)
+            if victim is not None:
+                victim.close();pool_stats['pressure_recycles']+=1
+                # Both snapshot and PSS must be refreshed together next loop.
+                continue
             # Do not credit reclaimed pages again while using this sweep's PSS.
             burst_headroom={k:snap[k] for k in ('available','cgroup_headroom')}
             if queue and len(active)>=dispatch_limit:last_reason='cpu_capacity';priority_wait=None
             while queue and len(active)<dispatch_limit:
-                idle=next((s for s in slots if s not in active),None)
+                idle=res.select_idle(slots,active,usage)
                 running=[(v['peak'],usage.get(s,0)) for s,v in active.items()]
                 chosen=None;last_reason='memory_reserve'
                 # Never bypass the highest-priority queued job for a cheaper V8.
@@ -325,9 +378,10 @@ def _run(args,slot_factory,monitor):
                         inflight_growth_bytes=sum(max(0,p-u) for p,u in running),
                         available_headroom_bytes=min(snap['available']-reserve,snap['cgroup_headroom']))
                 if chosen is None:
-                    # Return unused resident JAX/MuJoCo memory before waiting.
-                    for s in slots:
-                        if s not in active:s.close()
+                    victim=res.reclaim_idle(slots,active,usage,snap,reserve,idle,peak,shared)
+                    if victim is not None:
+                        victim.close();pool_stats['pressure_recycles']+=1
+                    else:pool_stats['reservation_waits_preserving_warm']+=1
                     break
                 i,mode,peak=chosen;heapq.heappop(queue);c=cases[i];r=records[i]
                 if idle is None:
@@ -346,6 +400,7 @@ def _run(args,slot_factory,monitor):
                 arguments=dict(input=c['input'],output=str(folder),source=c['source'],mode=mode,iterations=args.iterations,initial_iterations=args.initial_iterations,max_frames=None,legacy_frax=False,reuse_initial_from=reuse,require_initial_reuse=reuse is not None)
                 job=dict(input=c['input'],input_sha256=c['input_sha256'],log=str(folder.parent/(mode+'.log') if args.mode=='auto' else out/(c['id']+'.log')),arguments=arguments)
                 active[idle]=dict(index=i,mode=mode,folder=folder,peak=peak,reuse=reuse is not None)
+                pool_stats['resident_reuses' if idle.pid else 'process_starts']+=1
                 idle.start(job,min(timeout_for(args,mode,frames[i]),max(.01,args.budget-(time.monotonic()-started))))
                 snap=monitor()
                 for key in burst_headroom:

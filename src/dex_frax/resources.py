@@ -145,6 +145,31 @@ def can_admit(snapshot,reserve,free_disk,disk_floor,running,candidate_peak,candi
     if shared_reserve+reserved+max(0,candidate_peak-candidate_used)>headroom:return False,'memory_reserve'
     return True,None
 
+
+def select_idle(slots,active,usage):
+    """Prefer a resident JAX worker over an empty slot; credit only measured PSS."""
+    idle=[s for s in slots if s not in active]
+    return max(idle,key=lambda s:(bool(s.pid),
+        getattr(s,'telemetry',{}).get('cache_state')=='jax_hot',usage.get(s,0)),default=None)
+
+
+def reclaim_idle(slots,active,usage,snapshot,reserve,candidate=None,candidate_peak=0,shared=0):
+    """Reclaim one idle process only when real headroom needs it.
+
+    Future growth reservations alone must not evict warm workers. Under actual
+    pressure return memory, preferring noncandidate/cold workers. A sole reusable
+    candidate cannot make its own next job fit by being killed and respawned.
+    Never credit reclaimed memory until a fresh monitor/PSS sweep observes it.
+    """
+    headroom=min(snapshot['available']-reserve,snapshot['cgroup_headroom'])
+    pressure=headroom<0
+    incremental=shared+max(0,candidate_peak-usage.get(candidate,0))
+    if not pressure and (candidate is None or headroom>=incremental):return None
+    idle=[s for s in slots if s not in active and s.pid and usage.get(s,0)>0
+          and (pressure or s is not candidate)]
+    return max(idle,key=lambda s:(s is not candidate,
+        getattr(s,'telemetry',{}).get('cache_state')!='jax_hot',usage[s]),default=None)
+
 @contextlib.contextmanager
 def batch_lock():
     root=state_root();root.mkdir(parents=True,exist_ok=True)
