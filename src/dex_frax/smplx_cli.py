@@ -67,7 +67,7 @@ def check_input(args):
 def single_auto(args,worker_factory=None):
     """Reuse the geometry once; bound owned solver workers with the same budget."""
     from .cli import atomic_json,sha
-    from .cascade import Worker,accepted_artifact
+    from .cascade import Worker,accepted_artifact,STAGES
     out=Path(args.output).resolve();out.mkdir(parents=True,exist_ok=False)
     started=time.monotonic();attempts=[];selected=None;status='running';preview=None
     atomic_json(out/'run.json',dict(status=status,mode='auto',source='smplx'))
@@ -75,13 +75,12 @@ def single_auto(args,worker_factory=None):
     try:
         prepare(args,out,timeout=args.budget)
         worker=(worker_factory or Worker)()
-        for mode in ('frax','hybrid','v8'):
+        for mode in STAGES:
             remaining=args.budget-(time.monotonic()-started)
             if remaining<=0: status='budget_exhausted';break
             stage=out/mode
             options=vars(args).copy();options.update(output=str(stage),input=str(Path(args.input).resolve()),mode=mode)
-            if mode=='hybrid' and attempts and attempts[0]['status']=='complete':
-                options.update(reuse_initial_from=str(out/'frax'),require_initial_reuse=True)
+            options.update(reuse_initial_from=None,require_initial_reuse=False,legacy_frax=False)
             result=worker.run(dict(input=str(args.input),input_sha256=sha(args.input),log=str(out/(mode+'.log')),arguments=options),remaining)
             attempts.append(dict(mode=mode,**result))
             artifact=accepted_artifact(stage,result)

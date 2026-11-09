@@ -136,7 +136,7 @@ def test_arm_repair_does_not_release_body_contact(monkeypatch):
     out,report=adaptive.refine(r,t,x,{})
     assert calls==['body']
     assert report['after']['sustained_arm_bad_frames']==10
-    assert any(v.get('reason') in ('active_body_contact_requires_coupled_pose_search','fast_mode_full_clip_disabled_use_hybrid') for v in report['repairs'])
+    assert any(v.get('reason') in ('active_body_contact_requires_coupled_pose_search','fast_mode_full_clip_disabled_use_v8') for v in report['repairs'])
     np.testing.assert_array_equal(out,x)
 
 
@@ -149,7 +149,7 @@ def test_default_fast_route_never_runs_full_clip_fallback(monkeypatch):
     out,report=adaptive.refine(r,t,x,{})
     assert calls==[41]
     np.testing.assert_array_equal(out,x)
-    assert report['repairs'][-1]['reason']=='fast_mode_full_clip_disabled_use_hybrid'
+    assert report['repairs'][-1]['reason']=='fast_mode_full_clip_disabled_use_v8'
 
 
 def test_v8_work_budget_does_not_relax_acceptance(monkeypatch):

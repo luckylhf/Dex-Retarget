@@ -260,7 +260,7 @@ def refine(robot, t, xs, weights, config=None):
         begin=time.perf_counter()
         try:
             if not cfg.get('allow_full_clip_fallback',False):
-                raise ValueError('fast_mode_full_clip_disabled_use_hybrid')
+                raise ValueError('fast_mode_full_clip_disabled_use_v8')
             if stage == 'arms' and any(np.any(c['mode']) for c in t.get('body_contacts', [])):
                 raise ValueError('active_body_contact_requires_coupled_pose_search')
             candidate, detail = _stage(robot,t,out,weights,stage)

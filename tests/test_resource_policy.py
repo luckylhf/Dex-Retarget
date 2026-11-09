@@ -7,7 +7,7 @@ from dex_frax.resources import GIB
 
 def make(tmp_path):
     args=argparse.Namespace(worker_peak_gib=3.75,worker_resident_gib=1.,
-        hybrid_worker_peak_gib=1.5,v8_worker_peak_gib=1.,frame_memory_kib=32.)
+        v8_worker_peak_gib=1.,frame_memory_kib=32.)
     return ResourcePolicy(args,tmp_path,32)
 
 
@@ -18,7 +18,7 @@ def test_reload_changes_existing_admission_budget(tmp_path):
     policy.path.write_text(json.dumps(value))
     assert policy.reload(force=True)
     assert policy.revision!=before and policy.peak('frax',15000)==GIB+15000*16384
-    assert policy.shared(['frax','hybrid','v8'])==2.75*GIB
+    assert policy.shared(['frax','v8'])==2.75*GIB
     assert policy.shared(['v8'])==0
 
 

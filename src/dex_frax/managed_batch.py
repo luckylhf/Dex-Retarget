@@ -1,4 +1,4 @@
-"""Continuous per-clip cascade with live resource admission and one compiler."""
+"""Two-stage batch cascade with live resource admission and one compiler."""
 import gc
 import heapq
 from collections import Counter
@@ -30,7 +30,6 @@ def child(connection,options):
     from . import cli,model_cache
     cli._FROZEN_IDENTITY=options['identity']
     model_cache.enable(options['model'])
-    if options.get('scheduler_resume'):enable_scheduler_initial_reuse()
     _worker(connection)
 
 class Slot(Worker):
@@ -211,9 +210,9 @@ def _run(args,slot_factory,monitor):
         v8_worker_peak_base_gib=getattr(args,'v8_worker_peak_gib',args.worker_peak_gib),
         frax_resident_base_gib=getattr(args,'worker_resident_gib',args.worker_peak_gib),
         compile_extra_gib=max(0,args.worker_peak_gib-getattr(args,'worker_resident_gib',args.worker_peak_gib)),
-        peak_bytes_per_output_frame=admission.value['stages']['hybrid']['bytes_per_output_frame'],start_method='spawn',cgroup_limit_bytes=snap['cgroup_limit'],
+        peak_bytes_per_output_frame=admission.value['stages']['frax']['bytes_per_output_frame'],start_method='spawn',cgroup_limit_bytes=snap['cgroup_limit'],
         frax_peak_bytes_per_output_frame=admission.value['stages']['frax']['bytes_per_output_frame'],
-        scheduling='strict_priority_warm_workers_v5',stage_barriers=False,long_seconds=60.,
+        scheduling='frax_all_then_independent_v8_v6',stage_barriers=args.mode=='auto',long_seconds=None,
         identity='frozen before workers, recomputed after workers',model='verified MJB, reused per spawn worker; no cross-process fork sharing')
     pool_stats=Counter()
     stop_path=out/'STOP'
@@ -238,11 +237,10 @@ def _run(args,slot_factory,monitor):
                 target_workers=min(admission.value['workers'],nworkers),reason='full_available_cpu',
                 external_load_control=False)
         policy.update(frax_resident_base_gib=admission.value['stages']['frax']['base_gib'],
-            hybrid_resident_base_gib=admission.value['stages']['hybrid']['base_gib'],
             v8_worker_peak_base_gib=admission.value['stages']['v8']['base_gib'],
             compile_extra_gib=admission.value['compile_extra_gib'],
             worker_peak_base_gib=admission.value['stages']['frax']['base_gib']+admission.value['compile_extra_gib'],
-            peak_bytes_per_output_frame=admission.value['stages']['hybrid']['bytes_per_output_frame'],
+            peak_bytes_per_output_frame=admission.value['stages']['frax']['bytes_per_output_frame'],
             frax_peak_bytes_per_output_frame=admission.value['stages']['frax']['bytes_per_output_frame'])
         measured=[usage.get(s,0) for s in slots]
         observed['max_active_workers']=max(observed['max_active_workers'],len(active))
@@ -356,6 +354,10 @@ def _run(args,slot_factory,monitor):
             burst_headroom={k:snap[k] for k in ('available','cgroup_headroom')}
             if queue and len(active)>=dispatch_limit:last_reason='cpu_capacity';priority_wait=None
             while queue and len(active)<dispatch_limit:
+                # Complete the entire Frax pass before any independent V8 work.
+                if args.mode=='auto' and queue[0][3]=='v8' and any(v['mode']=='frax' for v in active.values()):
+                    last_reason='frax_stage_barrier';priority_wait=None
+                    break
                 idle=res.select_idle(slots,active,usage)
                 running=[(v['peak'],usage.get(s,0)) for s,v in active.items()]
                 chosen=None;last_reason='memory_reserve'
@@ -364,7 +366,7 @@ def _run(args,slot_factory,monitor):
                 # required reserve instead of immediately consuming it again.
                 for _,_,index,mode in queue[:1]:
                     cache=getattr(idle,'telemetry',{}).get('cache_state','pure') if idle and idle.pid else 'pure'
-                    reuse_possible=mode=='hybrid' and any(a['mode']=='frax' and a['status']=='complete' for a in records[index]['attempts'])
+                    reuse_possible=False
                     peak=learning.predict(mode,cases[index]['source'],cache,frames[index],admission,reuse=reuse_possible)
                     compiling=[(v['mode'],cases[v['index']]['source']) for s,v in active.items()
                         if getattr(s,'telemetry',{}).get('compile_possible',v['mode']!='v8')]
@@ -396,7 +398,7 @@ def _run(args,slot_factory,monitor):
                             attempt['output']=str(archived.relative_to(out))
                     old_log=folder.parent/(mode+'.log') if args.mode=='auto' else out/(c['id']+'.log')
                     if old_log.exists():old_log.rename(old_log.with_name(old_log.name+'.interrupted.'+str(time.time_ns())))
-                reuse=str(out/c['id']/'frax') if mode=='hybrid' and args.mode=='auto' and any(a['mode']=='frax' and a['status']=='complete' for a in r['attempts']) else None
+                reuse=None
                 arguments=dict(input=c['input'],output=str(folder),source=c['source'],mode=mode,iterations=args.iterations,initial_iterations=args.initial_iterations,max_frames=None,legacy_frax=False,reuse_initial_from=reuse,require_initial_reuse=reuse is not None)
                 job=dict(input=c['input'],input_sha256=c['input_sha256'],log=str(folder.parent/(mode+'.log') if args.mode=='auto' else out/(c['id']+'.log')),arguments=arguments)
                 active[idle]=dict(index=i,mode=mode,folder=folder,peak=peak,reuse=reuse is not None)

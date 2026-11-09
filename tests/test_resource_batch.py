@@ -106,31 +106,31 @@ def setup(tmp_path,monkeypatch):
     monkeypatch.setattr(model_cache,'prepare',lambda *_:{})
     monkeypatch.setattr(r,'workers',lambda _:32)
     monkeypatch.setattr(r.shutil,'disk_usage',lambda _:argparse.Namespace(free=200*r.GIB))
-    FakeSlot.calls=[];FakeSlot.instances=[];FakeSlot.running=FakeSlot.peak=0;FakeSlot.plan={('easy','frax'):'accepted',('hybrid','hybrid'):'accepted',('v8','v8'):'accepted',('invalid','frax'):'input_error'}
+    FakeSlot.calls=[];FakeSlot.instances=[];FakeSlot.running=FakeSlot.peak=0;FakeSlot.plan={('easy','frax'):'accepted',('rescue','v8'):'accepted',('v8','v8'):'accepted',('invalid','frax'):'input_error'}
     cases=[]
-    for name in ('easy','hybrid','v8','review','invalid'):
+    for name in ('easy','rescue','v8','review','invalid'):
         p=tmp_path/(name+'.bvh');p.write_text(f'{name}\nFrames: 181\nFrame Time: 0.033333\n')
         cases.append(dict(id=name,input=p.name,input_sha256=sha(p),source='lafan'))
     manifest=tmp_path/'manifest.json';manifest.write_text(json.dumps(dict(cases=cases)))
-    return argparse.Namespace(manifest=manifest,output=tmp_path/'out',workers=32,mode='auto',budget=30.,memory_reserve_gib=10.,disk_reserve_gib=80.,worker_peak_gib=3.,resource_wait=.01,iterations=8,initial_iterations=100,frax_timeout=None,hybrid_timeout=None,v8_timeout=None)
+    return argparse.Namespace(manifest=manifest,output=tmp_path/'out',workers=32,mode='auto',budget=30.,memory_reserve_gib=10.,disk_reserve_gib=80.,worker_peak_gib=3.,resource_wait=.01,iterations=8,initial_iterations=100,frax_timeout=None,v8_timeout=None)
 
-def test_continuous_cascade_reuse_and_quality_do_not_change(setup):
+def test_two_stage_cascade_independence_and_quality_do_not_change(setup):
     result=batch.run(setup,FakeSlot,lambda:snapshot(17))
     assert [x['status'] for x in result]==['accepted','accepted','accepted','review','input_error']
     assert FakeSlot.peak==2  # 32 requested slots, only two peak reservations fit.
-    for name in ('easy','hybrid','v8','review','invalid'):
+    for name in ('easy','rescue','v8','review','invalid'):
         modes=[m for n,m,_ in FakeSlot.calls if n==name]
-        assert modes==sorted(modes,key=['frax','hybrid','v8'].index)
-    assert all(reuse is not None for _,m,reuse in FakeSlot.calls if m=='hybrid')
+        assert modes==sorted(modes,key=['frax','v8'].index)
+    assert all(reuse is None for _,_,reuse in FakeSlot.calls)
     assert len(json.loads((setup.output/'accepted.json').read_text())['motions'])==3
 
 
-def test_next_stage_starts_while_another_frax_is_still_running(setup):
+def test_v8_waits_for_entire_frax_pass(setup):
     class Slow(FakeSlot):
         slow_done=False;overlap=False
         def start(self,job,timeout):
             self.name=Path(job['input']).stem;self.mode=job['arguments']['mode'];self.polls=0
-            if self.mode=='hybrid' and not type(self).slow_done:type(self).overlap=True
+            if self.mode=='v8' and not type(self).slow_done:type(self).overlap=True
             super().start(job,timeout)
         def poll(self):
             if self.name=='review' and self.mode=='frax' and self.result is not None:
@@ -139,7 +139,7 @@ def test_next_stage_starts_while_another_frax_is_still_running(setup):
                 type(self).slow_done=True
             return super().poll()
     result=batch.run(setup,Slow,lambda:snapshot(60))
-    assert Slow.overlap and Slow.slow_done
+    assert not Slow.overlap and Slow.slow_done
     assert [r['status'] for r in result]==['accepted','accepted','accepted','review','input_error']
 
 
@@ -227,7 +227,7 @@ def test_resume_refuses_changed_source_manifest(setup):
     setup.manifest.write_text(json.dumps(manifest))
     with pytest.raises(ValueError,match='manifest'):batch.run(setup,FakeSlot,lambda:snapshot(17))
 
-def test_quality_failure_keeps_all_three_stages_under_new_policy(setup,monkeypatch):
+def test_quality_failure_runs_both_complete_stages(setup,monkeypatch):
     original=FakeSlot.start
     def start(self,job,timeout):
         original(self,job,timeout)
@@ -235,7 +235,7 @@ def test_quality_failure_keeps_all_three_stages_under_new_policy(setup,monkeypat
             self.result['flags']=['too_short_for_training_window']
     monkeypatch.setattr(FakeSlot,'start',start)
     records=batch.run(setup,FakeSlot,lambda:snapshot(17))
-    assert [(n,m) for n,m,_ in FakeSlot.calls if n=='review']==[('review','frax'),('review','hybrid'),('review','v8')]
+    assert [(n,m) for n,m,_ in FakeSlot.calls if n=='review']==[('review','frax'),('review','v8')]
     record=next(r for r in records if r['case']=='review')
     assert record['status']=='review' and not record.get('escalation',{}).get('stop')
     assert (setup.output/'review/frax/quality.json').exists()
@@ -254,19 +254,20 @@ def test_collision_only_after_full_repair_has_explicit_v8_override(setup,monkeyp
     monkeypatch.setattr(FakeSlot,'start',start)
     result=batch.run(setup,FakeSlot,lambda:snapshot(17))
     modes=[m for n,m,_ in FakeSlot.calls if n=='review']
-    assert modes==['frax','hybrid','v8']
+    assert modes==['frax','v8']
     assert next(r for r in result if r['case']=='review')['status']=='review'
 
 
-def test_sixty_second_routing_and_long_v8_first(setup):
+def test_all_durations_start_with_frax_then_long_v8_first(setup):
     manifest=json.loads(setup.manifest.read_text())
-    seconds={'easy':20,'hybrid':59,'v8':60,'review':61,'invalid':10}
+    seconds={'easy':20,'rescue':59,'v8':60,'review':61,'invalid':10}
     for case in manifest['cases']:
         path=setup.manifest.parent/case['input'];path.write_text(f"Frames: {seconds[case['id']]}\nFrame Time: 1\n")
         case['input_sha256']=sha(path)
     setup.manifest.write_text(json.dumps(manifest))
     result=batch.run(setup,FakeSlot,lambda:snapshot(60))
-    for name in ('v8','review'):assert [m for n,m,_ in FakeSlot.calls if n==name]==['v8']
+    for name in ('v8','review'):assert [m for n,m,_ in FakeSlot.calls if n==name]==['frax','v8']
+    assert all(m=='frax' for _,m,_ in FakeSlot.calls[:5])
     v8_calls=[n for n,m,_ in FakeSlot.calls if m=='v8']
     assert v8_calls.index('review')<v8_calls.index('v8')
     assert next(r for r in result if r['case']=='v8')['duration_s']==60.
@@ -293,7 +294,7 @@ def test_long_v8_cannot_consume_blocked_short_frax_budget(setup):
             return super().poll()
     batch.run(setup,SlowFirst,lambda:snapshot(14.5))
     assert SlowFirst.first_done
-    assert [x[0] for x in FakeSlot.calls[:2]]==['easy','hybrid']
+    assert [x[0] for x in FakeSlot.calls[:2]]==['easy','rescue']
 
 
 def test_external_cpu_load_does_not_reduce_full_capacity_dispatch(setup,monkeypatch):

@@ -19,7 +19,6 @@ class ResourcePolicy:
         self.value = dict(schema=1, workers=ceiling,memory_learning=not getattr(args,'no_memory_learning',False),
             compile_extra_gib=max(0., args.worker_peak_gib-resident),
             stages=dict(frax=dict(base_gib=resident, bytes_per_output_frame=per_frame),
-                hybrid=dict(base_gib=getattr(args, 'hybrid_worker_peak_gib', args.worker_peak_gib), bytes_per_output_frame=per_frame),
                 v8=dict(base_gib=getattr(args, 'v8_worker_peak_gib', args.worker_peak_gib), bytes_per_output_frame=per_frame)))
         self.revision = None
         self.signature = None
@@ -42,8 +41,8 @@ class ResourcePolicy:
             return type(v) in (int, float) and math.isfinite(v) and lower <= v <= upper
         if not number(value['compile_extra_gib'], 0., 16.):
             raise ValueError('Invalid shared compiler budget')
-        if set(value['stages']) != {'frax', 'hybrid', 'v8'}:
-            raise ValueError('All three stage budgets are required')
+        if set(value['stages']) != {'frax', 'v8'}:
+            raise ValueError('Both Frax and V8 stage budgets are required')
         for stage in value['stages'].values():
             if set(stage) != {'base_gib', 'bytes_per_output_frame'}:
                 raise ValueError('Invalid stage fields')
@@ -80,7 +79,7 @@ class ResourcePolicy:
         return resources.peak_bytes(frames, stage['base_gib'], stage['bytes_per_output_frame'])
 
     def shared(self, modes):
-        needed=any(m is True or (isinstance(m,str) and m in ('frax','hybrid')) for m in modes)
+        needed=any(m is True or (isinstance(m,str) and m == 'frax') for m in modes)
         return int(self.value['compile_extra_gib']*resources.GIB) if needed else 0
 
     def report(self):

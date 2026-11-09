@@ -58,6 +58,10 @@ def export_training(*args):
 
 
 def convert(args):
+    if args.mode not in ('frax','v8'):
+        raise ValueError('Conversion mode must be frax or v8; hybrid has been removed')
+    if getattr(args,'reuse_initial_from',None) is not None or getattr(args,'require_initial_reuse',False):
+        raise ValueError('Stages must solve independently; initial trajectory reuse is not supported')
     start = time.perf_counter()
     out = Path(args.output).resolve()
     out.mkdir(parents=True, exist_ok=False)
@@ -76,10 +80,6 @@ def convert(args):
             from .ik import FraxIK
             solve = FraxIK(args.iterations, args.initial_iterations,
                            improved=not getattr(args, 'legacy_frax', False), assets=ident['assets'])
-        reuse = getattr(args, 'reuse_initial_from', None)
-        if args.mode == 'hybrid' and reuse is not None:
-            from .initial_reuse import ReusedInitial
-            solve = ReusedInitial(reuse, ident, solve,strict=getattr(args,'require_initial_reuse',False))
         pkl = out / "motion.pkl"
         meta = run(args.input, pkl, source=args.source, fps=50., max_frames=args.max_frames,
                    initial_solver=solve, refine=args.mode != "frax",
@@ -114,7 +114,7 @@ def convert(args):
 
 
 def single_auto(args,worker_factory=None):
-    """One source always retains all three stages, independently of duration."""
+    """One source always retains both complete stages, independently of duration."""
     if args.source == 'smplx':
         from .smplx_cli import single_auto as smplx_auto
         return smplx_auto(args, worker_factory)
@@ -128,7 +128,7 @@ def single_auto(args,worker_factory=None):
         options=argparse.Namespace(**vars(args));options.manifest=manifest;options.single_pipeline=True
         options.budget=getattr(args,'budget',86400.)
         options.frax_timeout=max(900.,300.+.5*frames)
-        options.hybrid_timeout=options.v8_timeout=max(1800.,600.+1.5*frames)
+        options.v8_timeout=max(1800.,600.+1.5*frames)
         records=cascade.run(options,worker_factory or cascade.Worker)
     out=Path(args.output).resolve();batch=json.loads((out/'batch.json').read_text());record=records[0]
     atomic_json(out/'run.json',dict(status=batch['status'],quality=record['status'],mode='auto',
@@ -174,7 +174,7 @@ def main():
     conv.add_argument("input", type=Path)
     conv.add_argument("output", type=Path, help="New output directory; existing directories are never overwritten")
     conv.add_argument("--source", choices=["auto", "lafan", "soma", "mocap", "smplx"], default="auto")
-    conv.add_argument("--mode", choices=["auto", "hybrid", "frax", "v8"], default="auto")
+    conv.add_argument("--mode", choices=["auto", "frax", "v8"], default="auto")
     conv.add_argument('--budget',type=float,default=86400.,help='Single-file auto pipeline total seconds')
     conv.add_argument("--legacy-frax", action="store_true", help="Ablation: original frax IK without knee preference, contact easing or local repairs")
     conv.add_argument("--iterations", type=int, default=8)
@@ -185,10 +185,10 @@ def main():
     checking=sub.add_parser('check-input',help='Read-only validation of SMPL-X parameters; no geometry or IK')
     checking.add_argument('input',type=Path)
     add_options(checking)
-    batching=sub.add_parser('batch',help='Run a hash-pinned manifest with resource-guarded CPU workers and checked IK reuse')
+    batching=sub.add_parser('batch',help='Run a hash-pinned manifest with resource-guarded CPU workers and independent solvers')
     batching.add_argument('manifest',type=Path)
     batching.add_argument('output',type=Path)
-    batching.add_argument('--mode',choices=['frax','hybrid','v8','auto'],default='auto')
+    batching.add_argument('--mode',choices=['frax','v8','auto'],default='auto')
     batching.add_argument('--iterations',type=int,default=8)
     batching.add_argument('--initial-iterations',type=int,default=100)
     batching.add_argument('--budget',type=float,default=1800.,help='Total seconds; stop owned workers when exhausted in any batch mode')
@@ -200,7 +200,6 @@ def main():
     batching.add_argument('--disk-reserve-gib',type=float,default=80.)
     batching.add_argument('--worker-peak-gib',type=float,default=3.75,help='Frax cold baseline; excess over resident budget is reserved once for the compiler')
     batching.add_argument('--worker-resident-gib',type=float,default=1.,help='Frax resident baseline, plus per-frame memory')
-    batching.add_argument('--hybrid-worker-peak-gib',type=float,default=1.5,help='Hybrid resident baseline, plus per-frame memory')
     batching.add_argument('--frame-memory-kib',type=float,default=32.,help='Initial per-output-frame memory budget, hot-reloadable per stage')
     batching.add_argument('--resource-policy',type=Path,help='Live resource-only JSON; defaults to output/resource_policy.json, checked every 2 seconds')
     batching.add_argument('--no-memory-learning',action='store_true',help='Use configured resident estimates without learned completed-stage profiles')
@@ -209,7 +208,7 @@ def main():
     batching.add_argument('--resume',action='store_true',help='Verify and retain completed attempts in an interrupted batch; retry unfinished stages')
     batching.add_argument('--v8-for-collision-only',action='store_true',help='Compatibility option; auto mode already sends every unresolved quality failure to V8')
     batching.add_argument('--resource-wait',type=float,default=60.,help='Maximum seconds with no active work and insufficient resources')
-    for mode in ('frax','hybrid','v8'):
+    for mode in ('frax','v8'):
         batching.add_argument('--'+mode+'-timeout',type=float,help='Per-clip '+mode+' timeout in seconds')
     preview = sub.add_parser("preview")
     preview.add_argument("motions", nargs="+", type=Path)
@@ -238,7 +237,7 @@ def main():
             parser.exit(2,'Motion input error: '+str(exc)+'\n')
     elif args.command == 'batch':
         import math
-        values=[args.iterations,args.initial_iterations,args.budget,args.memory_target_percent,args.disk_reserve_gib,args.worker_peak_gib,args.worker_resident_gib,args.hybrid_worker_peak_gib,args.frame_memory_kib,args.ik_block_frames,args.v8_worker_peak_gib,args.resource_wait]+[getattr(args,m+'_timeout') for m in ('frax','hybrid','v8') if getattr(args,m+'_timeout') is not None]+([args.memory_limit_gib] if args.memory_limit_gib is not None else [])+([args.memory_reserve_gib] if args.memory_reserve_gib is not None else [])
+        values=[args.iterations,args.initial_iterations,args.budget,args.memory_target_percent,args.disk_reserve_gib,args.worker_peak_gib,args.worker_resident_gib,args.frame_memory_kib,args.ik_block_frames,args.v8_worker_peak_gib,args.resource_wait]+[getattr(args,m+'_timeout') for m in ('frax','v8') if getattr(args,m+'_timeout') is not None]+([args.memory_limit_gib] if args.memory_limit_gib is not None else [])+([args.memory_reserve_gib] if args.memory_reserve_gib is not None else [])
         if any(not math.isfinite(v) or v<=0 for v in values):
             parser.error('Batch iteration counts and budgets must be finite and positive')
         if args.worker_resident_gib>args.worker_peak_gib:parser.error('Resident memory cannot exceed cold-worker peak')

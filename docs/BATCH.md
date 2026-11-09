@@ -47,13 +47,13 @@ PY
 .venv/bin/dex-frax batch manifest.json outputs/batch --budget 604800
 ```
 
-输出目录必须是新目录。默认 `--mode auto --workers auto`：小于 60 秒的动作先 frax，再按需 hybrid；未通过项及不少于 60 秒的动作进入 V8。时长按 BVH 的 `Frames × Frame Time` 计算。frax、hybrid、V8 依次优先，前两者短动作优先，V8 长动作优先；内存不够派发高优先级动作时等待资源。
+输出目录必须是新目录。默认 `--mode auto --workers auto`：所有动作（包括不少于 60 秒的长动作）先跑完整 Frax；整批 Frax 结束后，仅未通过项从人体输入独立跑完整 V8，包含重新初解和全部 V8 后处理，不复用 Frax 轨迹。Frax 短动作优先，V8 长动作优先；时长按 BVH 的 `Frames × Frame Time` 计算。内存不够派发高优先级动作时等待资源；阶段切换前等待剩余 Frax 完成，此时可能暂时不能占满 CPU。
 
 默认保留 80 GiB 磁盘空间。小批次试跑时，若空余空间不足，可显式加 `--disk-reserve-gib 5`；大批次应按预计输出大小留足空间。磁盘空余低于预留量时，dynamic 和 manual 都会终止本批次工作进程并以 `resource_exhausted` 退出；释放空间后，使用同一清单、原输出目录及资源参数加 `--resume` 手动续跑。
 
-`--mode frax`、`--mode hybrid` 或 `--mode v8` 可将整批固定为一种模式。通过即停止升级；输入错误停止该动作，其他未通过项保留各阶段结果。
+`--mode frax` 或 `--mode v8` 可将整批固定为一种完整模式；`hybrid` 已移除。通过即停止升级；输入错误停止该动作，其他未通过项保留各阶段结果。V8 后仍未通过的动作保留待审，安全与质量门槛不变。
 
-总预算默认 **1800 秒**，`--budget` 和 `--frax-timeout / --hybrid-timeout / --v8-timeout` 均为秒。
+总预算默认 **1800 秒**，`--budget` 和 `--frax-timeout / --v8-timeout` 均为秒。
 
 - **总预算耗尽：**终止整个批次的在途工作进程，以 `budget_exhausted` 结束批次。
 - **单条阶段超时：**仅终止对应工作进程并记录 `timeout`；其他动作在剩余总预算内继续处理，自动模式可按分级规则尝试该动作的下一阶段。
@@ -73,9 +73,9 @@ rm -f outputs/batch/STOP
 .venv/bin/dex-frax batch manifest.json outputs/batch --budget 604800 --resume
 ```
 
-续跑校验清单、输入、实现、资产、依赖、转换参数和已完成产物哈希；保留完成阶段，将未完成阶段归档后重试。资产身份包括目录内的 README 等全部文件，运行中及续跑前均应保持原字节。修改求解、审核或导出实现后应使用新目录。不要在运行中覆盖代码或资产文件。
+续跑校验清单、输入、实现、资产、依赖、转换参数和已完成产物哈希；保留完成阶段，将未完成阶段归档后重试。资产身份包括目录内的 README 等全部文件，运行中及续跑前均应保持原字节。修改求解、审核或导出实现后应使用新目录。不要在运行中覆盖代码或资产文件。此次两阶段流程变更需要新输出目录，不能用调度兼容开关续跑旧三阶段批次；旧产物保留原身份。
 
-仅更改 `managed_batch.py` / `resources.py` 的维护场景可显式设置 `DEX_FRAX_ALLOW_SCHEDULER_RESUME=1`，允许调度兼容续跑及初解复用。其他身份仍严格核验，差异写入 `scheduler_resume.*.json`，原产物身份保留。
+仅更改 `managed_batch.py` / `resources.py` 的维护场景可显式设置 `DEX_FRAX_ALLOW_SCHEDULER_RESUME=1`，允许调度兼容续跑。其他身份仍严格核验，差异写入 `scheduler_resume.*.json`，原产物身份保留。
 
 ## 资源设置
 
@@ -87,7 +87,7 @@ rm -f outputs/batch/STOP
 
 默认状态目录为 `~/.cache/dex-frax`，可用 `DEX_FRAX_STATE_DIR` 指定。批次锁防止同一状态目录重复占用资源；共享 JAX 缓存应仅允许本用户写入。完整参数见 `dex-frax batch --help`。
 
-启动时生成 `resource_policy.json`，也可用 `--resource-policy` 指定已有文件。每 2 秒检查修改，可调整 `workers`、`memory_learning`、`compile_extra_gib` 和各 `stages` 的内存估算；`workers` 不得超过启动上限。建议在生成的完整文件上修改并原子替换，非法配置保留最近有效值。热加载不改变求解参数、质量门槛或 cgroup 硬限制。
+启动时生成 `resource_policy.json`，也可用 `--resource-policy` 指定已有文件。每 2 秒检查修改，可调整 `workers`、`memory_learning`、`compile_extra_gib` 和 `stages.frax`、`stages.v8` 的内存估算；`workers` 不得超过启动上限。建议在生成的完整文件上修改并原子替换，非法配置保留最近有效值。热加载不改变求解参数、质量门槛或 cgroup 硬限制。
 
 ## 状态和结果
 

@@ -7,12 +7,12 @@ from dex_frax import cascade
 from dex_frax.cli import sha
 
 
-def arguments(tmp_path,names=('easy','hybrid_ok','v8_ok','bad_input','unresolved')):
+def arguments(tmp_path,names=('easy','retry_ok','v8_ok','bad_input','unresolved')):
     source=tmp_path/'input.bvh';source.write_text('fixture')
     manifest=tmp_path/'manifest.json';manifest.write_text(json.dumps({'cases':[
         dict(id=name,input=source.name,input_sha256=sha(source),source='lafan') for name in names]}))
     return argparse.Namespace(manifest=manifest,output=tmp_path/'out',budget=30.,
-        frax_timeout=2.,hybrid_timeout=3.,v8_timeout=4.,iterations=8,initial_iterations=100)
+        frax_timeout=2.,v8_timeout=4.,iterations=8,initial_iterations=100)
 
 
 class FakeWorker:
@@ -33,22 +33,20 @@ class FakeWorker:
         return dict(status='complete',quality=status,flags=quality['flags'],result=result,elapsed_s=.1)
 
 
-def test_wave_order_early_accept_reuse_and_input_error(tmp_path):
+def test_wave_order_early_accept_independent_v8_and_input_error(tmp_path):
     args=arguments(tmp_path)
-    worker=FakeWorker({('easy','frax'):'accepted',('hybrid_ok','hybrid'):'accepted',
-        ('v8_ok','frax'):'timeout',('v8_ok','hybrid'):'failed',('v8_ok','v8'):'accepted',
+    worker=FakeWorker({('easy','frax'):'accepted',('retry_ok','v8'):'accepted',
+        ('v8_ok','frax'):'timeout',('v8_ok','v8'):'accepted',
         ('bad_input','frax'):'input_error'})
     records=cascade.run(args,lambda:worker)
     assert [r['status'] for r in records]==['accepted','accepted','accepted','input_error','review']
     assert [(a,b) for a,b,_,_ in worker.calls]==[
-        ('easy','frax'),('hybrid_ok','frax'),('v8_ok','frax'),('bad_input','frax'),('unresolved','frax'),
-        ('hybrid_ok','hybrid'),('v8_ok','hybrid'),('unresolved','hybrid'),('v8_ok','v8'),('unresolved','v8')]
-    assert worker.calls[5][2].endswith('hybrid_ok/frax')
-    assert worker.calls[6][2] is None
-    assert worker.calls[-2][2] is None
+        ('easy','frax'),('retry_ok','frax'),('v8_ok','frax'),('bad_input','frax'),('unresolved','frax'),
+        ('retry_ok','v8'),('v8_ok','v8'),('unresolved','v8')]
+    assert all(reuse is None for _,_,reuse,_ in worker.calls)
     assert worker.closed
     accepted=json.loads((args.output/'accepted.json').read_text())['motions']
-    assert [r['mode'] for r in accepted]==['frax','hybrid','v8']
+    assert [r['mode'] for r in accepted]==['frax','v8','v8']
     assert all((args.output/r['training_npz']).exists() for r in accepted)
     assert json.loads((args.output/'v8_ok/frax/run.json').read_text())['status']=='timeout'
 

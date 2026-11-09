@@ -1,7 +1,7 @@
 """Deterministic duration routing; the BVH header is the only probe."""
 from decimal import Decimal
 
-STAGES=('frax','hybrid','v8')
+STAGES=('frax','v8')
 
 
 def deduplicate(cases):
@@ -29,11 +29,11 @@ def duration_seconds(path):
 
 
 def route(mode,duration,single=False):
-    if mode!='auto':return (mode,)
-    return STAGES if single or duration<Decimal('60') else ('v8',)
+    if mode not in ('auto', *STAGES):raise ValueError('Unknown conversion mode: '+str(mode))
+    return STAGES if mode=='auto' else (mode,)
 
 
 def priority(entry,durations):
     index,mode=entry
-    # Finish short first-pass work first; use free tail slots for queued V8.
+    # Short Frax first; the scheduler drains all Frax before longest-first V8.
     return (STAGES.index(mode), -durations[index] if mode=='v8' else durations[index])

@@ -2,6 +2,8 @@
 
 把人体动作转换为 **Dex 29 关节、50 Hz 的机器人运动学参考**，用于动作预览和后续训练数据准备。支持 LAFAN1、BONES-SEED SOMA Uniform、已适配骨架的 BVH，以及 SMPL-X 人体参数（`.pt` / `.npz` / `.pkl`）。
 
+如果想使用视频中人体动作，建议参考Dex-Video2Robot(https://github.com/luckylhf/Dex-Video2Robot)的Dex-GMR部分，使用生成的.pt文件当做输入进行转换。
+
 默认自动尝试求解、接触修正和避碰，再做统一质量检查。通过后才生成训练导出；结果仍需下游动力学跟踪与真机验证。
 
 ## 1. 安装
@@ -33,7 +35,13 @@ python3.12 -m venv .venv
   outputs/nobody --source mocap
 ```
 
-单文件默认依次尝试 `frax → hybrid → v8`，通过即停止。`frax` 生成快速候选，`hybrid` 加入完整后处理，`v8` 独立重新求解。可用 `--mode frax`、`--mode hybrid` 或 `--mode v8` 固定一种模式。
+单文件默认 `--mode auto`：先运行完整 `frax`（含局部纠偏、避碰和验收），未通过再从人体输入独立运行完整 `v8`（重新初解及全部 V8 后处理），通过即停止。V8 不复用 Frax 初解或最终轨迹；两阶段使用原有统一安全与质量门槛。`hybrid` 模式已移除。
+
+| 调用 | 行为 |
+|---|---|
+| `--mode auto`（默认） | 完整 Frax；未通过再独立完整 V8 |
+| `--mode frax` | 只运行完整 Frax，不自动升级 |
+| `--mode v8` | 直接运行独立完整 V8 |
 
 替换输入时，LAFAN1 用 `--source lafan`，SOMA Uniform 用 `--source soma`。`mocap` 只适用于已验证的骨架，不能直接接收任意 BVH。
 
@@ -78,7 +86,7 @@ SMPL-X 示例需先按 [输入规范](docs/INPUTS.md) 配好 `SMPLX_MODEL_DIR` �
 .venv/bin/dex-frax batch manifest.json outputs/batch --budget 604800
 ```
 
-批处理默认使用全部可用 CPU，受内存和磁盘准入约束；内存目标为系统与程序合计约 90%。小于 60 秒的动作先走 `frax → hybrid`，未通过项和长动作进入 V8。默认总预算只有 1800 秒，长批次需显式调整。SMPL-X 使用单文件入口。
+批处理默认使用全部可用 CPU，受内存和磁盘准入约束；内存目标为系统与程序合计约 90%。所有时长的动作先完成整批 Frax，再对未通过项运行独立完整 V8；取消 60 秒分流。Frax 短动作优先，V8 长动作优先。输入错误停止该动作，V8 后仍未通过的产物保留待审，不导出训练数据。默认总预算只有 1800 秒，长批次需显式调整。SMPL-X 使用单文件入口。
 
 默认磁盘保留量为 **80 GiB**。小批次试跑且空余空间不足时，可加 `--disk-reserve-gib 5`；按实际输出规模设置余量。低于预留量会停止批次，释放空间后手动 `--resume`。
 

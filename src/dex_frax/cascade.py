@@ -1,4 +1,4 @@
-"""Time-bounded single-file frax -> hybrid -> V8 orchestration."""
+"""Time-bounded single-file complete Frax -> independent complete V8 orchestration."""
 import argparse
 import contextlib
 import hashlib
@@ -10,7 +10,7 @@ import sys
 import time
 from .cli import atomic_json, sha
 
-STAGES = ('frax','hybrid','v8')
+from .dispatch import STAGES
 
 
 def load_manifest(path, contents=None):
@@ -152,11 +152,9 @@ def run(args,worker_factory=Worker):
                     state='budget_exhausted';break
                 case_dir=out if getattr(args,'single_pipeline',False) else out/source['id'];case_dir.mkdir(exist_ok=True)
                 folder=case_dir/mode
-                previous=case_dir/'frax'
-                reuse=str(previous) if mode=='hybrid' and any(a['mode']=='frax' and a['status']=='complete' for a in record['attempts']) else None
                 arguments=dict(input=source['input'],output=str(folder),source=source['source'],mode=mode,
                     iterations=args.iterations,initial_iterations=args.initial_iterations,max_frames=getattr(args,'max_frames',None),
-                    legacy_frax=False,reuse_initial_from=reuse,require_initial_reuse=reuse is not None)
+                    legacy_frax=False,reuse_initial_from=None,require_initial_reuse=False)
                 job=dict(input=source['input'],input_sha256=source['input_sha256'],log=str(case_dir/(mode+'.log')),arguments=arguments)
                 active=(record,folder,mode)
                 response=worker.run(job,min(timeouts[mode],remaining))

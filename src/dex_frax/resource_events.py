@@ -7,7 +7,6 @@ _sink=None
 _jax_hot=False
 _stage='loading'
 STAGES={'frax':('loading','preprocessing','initial','fast_refinement','export_check','audit','export'),
-        'hybrid':('loading','preprocessing','initial','support','arms','body_contacts','self_collision','export_check','audit','export'),
         'v8':('loading','preprocessing','initial','support','arms','body_contacts','self_collision','export_check','audit','export')}
 
 
