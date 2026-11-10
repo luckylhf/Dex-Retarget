@@ -6,7 +6,7 @@ import os
 _sink=None
 _jax_hot=False
 _stage='loading'
-STAGES={'frax':('loading','preprocessing','initial','fast_refinement','export_check','audit','export'),
+STAGES={'frax':('loading','preprocessing','initial','fast_refinement','local_repair','export_check','audit','export'),
         'v8':('loading','preprocessing','initial','support','arms','body_contacts','self_collision','export_check','audit','export')}
 
 

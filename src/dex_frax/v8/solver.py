@@ -19,6 +19,9 @@ class Objective:
         self.cache_x=None
 
     def evaluate(self,x):
+        if self.w.get('_repair_deadline') is not None:
+            import time
+            if time.monotonic()>=self.w['_repair_deadline']:raise TimeoutError('window_solver_deadline')
         if self.cache_x is not None and np.array_equal(x,self.cache_x):return self.cache
         rob,t,i,w=self.robot,self.t,self.i,self.w
         rob.set(x,t['root_r'][i]);res=[];jac=[];nc=len(x);eye=np.eye(nc)

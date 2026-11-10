@@ -5,6 +5,8 @@ initial frax trajectory stays the reference elsewhere; there is no full-clip
 arm branch search or output-only angle filter.
 """
 import time
+import json
+from pathlib import Path
 import numpy as np
 from scipy.sparse import block_diag, diags, eye, kron, vstack
 from scipy.spatial.transform import Rotation
@@ -81,8 +83,20 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
     # outside second differences. Clip endpoints follow the same convention.
     if a > 0: lo[:2] = hi[:2] = xs[a:a+2,ids]
     if b < len(xs): lo[-2:] = hi[-2:] = xs[b-2:b,ids]
-    low = np.r_[lo.ravel(), -np.ones((n-1)*d)]
-    high = np.r_[hi.ravel(), np.ones((n-1)*d)]
+    physical_step=robot.speed_limits[ids-3]/t['fps']
+    velocity_tolerance=1e-4/t['fps']
+    speed_bounds=np.ones((n-1,d))
+    # Numerical step caps stabilize new solves; they are not motor limits.
+    # Preserve immutable already-valid intervals, including outputs from the
+    # arm fitter that legitimately exceed the numerical cap. Movable rows
+    # retain that cap, and actual motor violations are never exempted.
+    for edge,enabled in ((0,a>0),(-1,b<len(xs))):
+        if enabled:
+            actual=abs(np.diff(xs[a:b,ids],axis=0))[edge]
+            rounding=(actual>step)&(actual<=physical_step+velocity_tolerance)
+            speed_bounds[edge,rounding]=actual[rounding]/step[rounding]
+    low = np.r_[lo.ravel(), -speed_bounds.ravel()]
+    high = np.r_[hi.ravel(), speed_bounds.ravel()]
 
     def evaluate(z, jacobian=False):
         qs = z.reshape(n, d)
@@ -106,7 +120,17 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
         q=xs[a:b,ids].copy()
     if a>0:q[:2]=xs[a:a+2,ids]
     if b<len(xs):q[-2:]=xs[b-2:b,ids]
-    z = q.ravel(); initial = evaluate(z); cost0 = cost = float(initial @ initial)+(geometry.evaluate(z) if geometry else 0.)
+    z = q.ravel()
+    seed_projection = None
+    if seed is not None:
+        # A different IK branch can be far from the immutable joins. The
+        # per-iteration 0.3-rad trust region is not a feasibility solver:
+        # first find a globally speed/bounds-feasible seed in this window.
+        at = A @ z
+        if np.any(at < low-1e-8) or np.any(at > high+1e-8):
+            z, seed_projection = _qp(eye(z.size,format='csc'),-z,A,low,high,
+                xs[a:b,ids].ravel(),scaling=10)
+    initial = evaluate(z); cost0 = cost = float(initial @ initial)+(geometry.evaluate(z) if geometry else 0.)
     accepted = 0
     for _ in range(iterations):
         res, J = evaluate(z, True)
@@ -136,9 +160,10 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
     if a > 0: out[a:a+2] = xs[a:a+2]
     if b < len(xs): out[b-2:b] = xs[b-2:b]
     checked=out[max(0,a-1):min(len(out),b+1),ids] if local_checks else out[:,ids]
-    if (np.max(abs(np.diff(checked, axis=0)) - step) > 1e-7 or
-            np.any(out[:, ids] < robot.lower[ids]-1e-7) or
-            np.any(out[:, ids] > robot.upper[ids]+1e-7)):
+    joint_tolerance=np.deg2rad(json.loads(Path(__file__).with_name('quality_pose.json').read_text())['joint_limit_tolerance_deg'])
+    if (np.max(abs(np.diff(checked, axis=0)) - physical_step) > velocity_tolerance or
+            np.any(out[:, ids] < robot.lower[ids]-joint_tolerance) or
+            np.any(out[:, ids] > robot.upper[ids]+joint_tolerance)):
         raise ValueError('window_join_or_joint_bounds')
     old_floor, new_floor = _floor(robot, t, xs, a, b), _floor(robot, t, out, a, b)
     if new_floor < min(-.001, old_floor-1e-6):
@@ -156,7 +181,7 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
                 delta=robot.point(body,local)-before
                 if np.max(abs(delta if mode==1 else delta[2:]))>.0005:raise ValueError('local_arm_support_changed')
     return out, dict(start=a, end=b, status='repaired', iterations=accepted,
-                     initial_cost=cost0, cost=cost, minimum_floor_m=new_floor)
+                     initial_cost=cost0, cost=cost, minimum_floor_m=new_floor,seed_projection=seed_projection)
 
 
 def split_windows(ranges, maximum, overlap):

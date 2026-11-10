@@ -28,9 +28,19 @@ def duration_seconds(path):
     return Decimal(frames)*dt
 
 
-def route(mode,duration,single=False):
+def pipeline_stages(args):
+    return ('frax',) if getattr(args,'pipeline','unified')=='unified' else STAGES
+
+
+def use_unified(args):
+    if getattr(args,'profile',None) in ('fast','refine'):return args.profile=='refine'
+    return getattr(args,'mode',None)=='auto' and getattr(args,'pipeline','unified')=='unified'
+
+
+def route(mode,duration,single=False,pipeline='unified'):
     if mode not in ('auto', *STAGES):raise ValueError('Unknown conversion mode: '+str(mode))
-    return STAGES if mode=='auto' else (mode,)
+    if pipeline not in ('unified','two-stage'):raise ValueError('Unknown pipeline: '+pipeline)
+    return (('frax',) if pipeline=='unified' else STAGES) if mode=='auto' else (mode,)
 
 
 def priority(entry,durations):

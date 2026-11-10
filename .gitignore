@@ -10,6 +10,7 @@ outputs/
 # User-facing documentation only; maintenance notes and receipts stay local.
 /maintenance_local/
 /docs/*
+!/docs/PIPELINE.md
 !/docs/INPUTS.md
 !/docs/BATCH.md
 !/docs/FRAX_LICENSE

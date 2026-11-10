@@ -34,6 +34,8 @@ def load(path, fps=None, units='cm', translations='absolute'):
     For BVH producers that encode channels as deltas from OFFSET, explicitly
     select translations='offset'. Do not guess from a file's first pose.
     """
+    if units not in ('cm','m','mm'):raise ValueError('Unsupported BVH units: '+str(units))
+    if translations not in ('absolute','offset'):raise ValueError('Unsupported BVH translation convention: '+str(translations))
     text = Path(path).read_text()
     head, body = text.split('MOTION', 1)
     tok = re.findall(r'[^\s{}]+|[{}]', head)

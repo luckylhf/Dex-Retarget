@@ -4,7 +4,7 @@
   "geometry_acceptance_m": 0.001,
   "arm_direction_deg": 20.0,
   "hand_axis_deg": 25.0,
-  "elbow_axis_deg": 30.0,
+  "elbow_axis_deg": 40.0,
   "pose_duration_s": 0.1,
   "window_padding_s": 0.4,
   "maximum_local_window_s": 4.0,

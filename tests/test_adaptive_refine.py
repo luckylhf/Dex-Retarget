@@ -8,7 +8,7 @@ def scene():
     n=80
     r=SimpleNamespace(lower=np.full(32,-3.), upper=np.full(32,3.),
                       sides={'Left':dict(leg=[3,4,5,6,7,8]),'Right':dict(leg=[9,10,11,12,13,14])},
-                      joint_step=lambda fps,cfg:np.full(29,.1))
+                      speed_limits=np.full(29,5.),joint_step=lambda fps,cfg:np.full(29,.1))
     t=dict(fps=50.,hips=np.zeros((n,3)),root_r=np.tile(np.eye(3),(n,1,1)),
            sides={'Left':dict(segments=[]),'Right':dict(segments=[])},body_contacts=[])
     return r,t,np.zeros((n,32))
@@ -100,9 +100,9 @@ def test_stage_restores_bounds_and_diagnostics_even_on_failure(monkeypatch):
 
 def test_elbow_gate_requires_sustained_error():
     r,t,x=scene();errors=fake_metrics(r,t,x)['errors'];cfg=adaptive.policy()
-    errors['Left']['elbow_axis'][10:14]=40.
+    errors['Left']['elbow_axis'][10:14]=41.
     assert not adaptive.pose_mask(errors,50.,cfg).any()
-    errors['Left']['elbow_axis'][14]=40.
+    errors['Left']['elbow_axis'][14]=41.
     assert adaptive.pose_mask(errors,50.,cfg).sum()==5
 
 
@@ -128,7 +128,7 @@ def test_arm_repair_does_not_release_body_contact(monkeypatch):
     r,t,x=scene();mode=np.zeros(80);mode[35]=1
     t['body_contacts']=[dict(mode=mode)]
     def metrics(r,t,q):
-        v=fake_metrics(r,t,q);v['errors']['Left']['elbow_axis'][30:40]=40.;return v
+        v=fake_metrics(r,t,q);v['errors']['Left']['elbow_axis'][30:40]=41.;return v
     monkeypatch.setattr(adaptive,'inspect',metrics)
     calls=[]
     def stage(r,t,q,w,kind):calls.append(kind);return q.copy(),[]
@@ -203,3 +203,13 @@ def test_mixed_knee_signs_get_per_frame_existing_branch_corridor(monkeypatch):
     assert captured['repair_lower_bounds'][0,j]==0.
     assert captured['repair_lower_bounds'][10,j]==r.lower[j]
     assert 'repair_lower_bounds' not in t
+
+
+def test_final_candidate_uses_motor_contract_not_numerical_solver_cap(monkeypatch):
+    r,t,x=scene();r.speed_limits[:]=10.
+    after=x.copy();after[35,3]=.15  # 7.5 rad/s is above the numeric5 but below motor10.
+    monkeypatch.setattr(adaptive,'inspect',fake_metrics)
+    adaptive.check_candidate(r,t,x,after,{},adaptive.policy(),fake_metrics(r,t,x))
+    after[35,3]=.21
+    with pytest.raises(ValueError,match='join_or_velocity_failure'):
+        adaptive.check_candidate(r,t,x,after,{},adaptive.policy(),fake_metrics(r,t,x))

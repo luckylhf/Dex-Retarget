@@ -104,7 +104,7 @@ def test_auto_smplx_selection_does_not_promote_review(tmp_path,monkeypatch):
             assert not job['arguments'].get('require_initial_reuse',False)
             self.calls.append(job['arguments']['mode'])
             return dict(status='complete',quality='review',flags=['source_pose_mismatch'],result={})
-    args=argparse.Namespace(input=path,output=tmp_path/'out',budget=10.)
+    args=argparse.Namespace(pipeline='two-stage',input=path,output=tmp_path/'out',budget=10.)
     worker=Worker();record=smplx_cli.single_auto(args,lambda:worker)
     assert worker.calls==['frax','v8'] and record['selected_mode'] is None
     assert record['preview_output']=='v8' and record['training_npz'] is None

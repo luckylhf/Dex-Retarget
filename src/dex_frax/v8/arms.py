@@ -20,6 +20,9 @@ class ArmObjective:
         self.r,self.t,self.i,self.side,self.base,self.w=robot,t,i,side,np.asarray(base,dtype=float).copy(),weights
         self.ids=robot.sides[side]['arm'];self.prior=prior;self.pw=prior_weight;self.cx=None
     def evaluate(self,q):
+        deadline=self.w.get('_repair_deadline')
+        if deadline is not None and time.monotonic()>=deadline:
+            raise TimeoutError('arm_branch_deadline')
         if self.cx is not None and np.array_equal(q,self.cx):return self.cache
         r,t,i=self.r,self.t,self.i;g=r.sides[self.side];v=t['sides'][self.side];w=self.w
         hand_direction_weight,hand_width_weight=hand_weights(w,v,i)
@@ -73,14 +76,27 @@ class ArmObjective:
     def fun(self,q):return self.evaluate(q)[0]
     def jac(self,q):return self.evaluate(q)[1]
 
+def arm_objective(*args,**kwargs):
+    obj=ArmObjective(*args,**kwargs)
+    from ..arm_policy import enabled
+    if enabled(obj.w):
+        from ..similarity import WholeArmObjective
+        return WholeArmObjective(obj)
+    return obj
+
+
 def plan_and_refine(robot,t,xs,cfg,progress=None,_only_sides=None):
     from ..arm_tracking import SearchEvents,acceptable,track,local_temporal,eligible,hard_frames,original_window
     from ..resource_events import phase
     n=len(xs);fps=t['fps'];step=max(1,round(fps/15))
-    event_tracking=cfg.get('arm_event_tracking',False) and cfg.get('arm_adaptive_candidates',False)
+    checkpoint=cfg.get('_branch_progress')
+    event_tracking=checkpoint is None and cfg.get('arm_event_tracking',False) and cfg.get('arm_adaptive_candidates',False)
     knots=np.unique(np.r_[np.arange(0,n,step),n-1]);out=xs.copy();report={}
     for side,g in robot.sides.items():
         if _only_sides is not None and side not in _only_sides:continue
+        saved={} if checkpoint is None else checkpoint.setdefault(side,{})
+        if 'complete' in saved:
+            out[:,g['arm']]=np.asarray(saved['complete']);report[side]=saved['report'];continue
         timings={};phase_start=time.perf_counter();candidate_calls=0;full_knots=0;search_reasons=[]
         side_event=event_tracking
         hard=hard_frames(robot,t,xs,cfg,side) if side_event else np.ones(n,dtype=bool)
@@ -98,9 +114,13 @@ def plan_and_refine(robot,t,xs,cfg,progress=None,_only_sides=None):
         ids=g['arm'];lo=robot.lower[ids]+1e-6;hi=robot.upper[ids]-1e-6;sgn=1 if side=='Left' else -1
         joint_step=robot.joint_step(fps,cfg)[np.asarray(ids)-3]
         nodes=[];costs=[];previous=[];events=SearchEvents();tracking_calls=0;reused_knots=0;proximal_fits=0;reused_frames=0;frame_solver_calls=0
+        if 'nodes' in saved:
+            nodes=[np.asarray(v) for v in saved['nodes']];costs=[np.asarray(v) for v in saved['costs']]
+            previous=[v.copy() for v in nodes[-1][:2]]
         phase('arms_candidates')
         for ki,i in enumerate(knots):
-            obj=ArmObjective(robot,t,i,side,xs[i],weights)
+            if ki<len(nodes):continue
+            obj=arm_objective(robot,t,i,side,xs[i],weights)
             seeds=[xs[i,ids]]+previous;fixed=[]
             # Cover both admissible shoulder branches and forearm twist signs.
             for pitch,roll,yaw,twist in [(0,.4,0,0),(-1.,1.4,1.8,-1.8),(1.,2.6,-1.8,1.8),(-1.,2.6,-1.8,1.8),(1.,.4,1.8,-1.8)]:
@@ -148,6 +168,7 @@ def plan_and_refine(robot,t,xs,cfg,progress=None,_only_sides=None):
                 if not any(np.linalg.norm(result.x-q)<.08 for q,_ in candidates):candidates.append((result.x,float(result.cost)))
             candidates.sort(key=lambda z:z[1]);candidates=candidates[:5]
             previous=[q for q,c in candidates[:2]];nodes.append(np.array([q for q,c in candidates]));costs.append(np.array([c for q,c in candidates]))
+            if checkpoint is not None:saved.update(nodes=[v.tolist() for v in nodes],costs=[v.tolist() for v in costs])
             if progress and (ki+1)%120==0:progress(side,'branches',ki+1,len(knots))
         timings['candidate_search_s']=time.perf_counter()-phase_start;phase_start=time.perf_counter()
         total=costs[0].copy();backs=[]
@@ -173,8 +194,9 @@ def plan_and_refine(robot,t,xs,cfg,progress=None,_only_sides=None):
         phase('arms_frame_fit')
         # The selected offline path is the initialization AND a weak prior.
         # Its future context avoids a forward greedy trap near a joint limit.
-        for i in range(n):
-            obj=ArmObjective(robot,t,i,side,out[i],weights,seeds[i],.12)
+        if 'frame_q' in saved:out[:,ids]=np.asarray(saved['frame_q'])
+        for i in range(saved.get('frame_next',0),n):
+            obj=arm_objective(robot,t,i,side,out[i],weights,seeds[i],.12)
             if side_event and not hard[i]:
                 result,calls,kind=track(obj,[seeds[i],xs[i,ids]],lo,hi)
                 frame_solver_calls+=calls;reused_frames+=int(kind=='reuse');proximal_fits+=int(kind=='proximal')
@@ -182,6 +204,7 @@ def plan_and_refine(robot,t,xs,cfg,progress=None,_only_sides=None):
                 result=least_squares(obj.fun,np.clip(seeds[i],lo+1e-5,hi-1e-5),jac=obj.jac,bounds=(lo,hi),max_nfev=25,ftol=1e-6,xtol=1e-6,gtol=1e-5)
                 frame_solver_calls+=1
             out[i,ids]=result.x
+            if checkpoint is not None:saved.update(frame_q=out[:,ids].tolist(),frame_next=i+1)
             if progress and (i+1)%120==0:progress(side,'frame_fit',i+1,n)
         # Joint-space temporal optimization across the entire clip. Filtering
         # angles alone would lose hand orientation; pose residuals participate
@@ -204,18 +227,22 @@ def plan_and_refine(robot,t,xs,cfg,progress=None,_only_sides=None):
         # A failed fast temporal bypass needs the original continuity fit once.
         # Do not rerun whole-clip branch search, and do not force a new branch
         # at arbitrary window cuts merely to avoid this necessary fit.
-        objectives=[ArmObjective(robot,t,i,side,out[i],weights) for i in range(n)]
+        objectives=[arm_objective(robot,t,i,side,out[i],weights) for i in range(n)]
         f=fps/60.
         D1=kron(diags([-np.ones(n-1),np.ones(n-1)],[0,1],shape=(n-1,n)),eye(7),format='csr')*.18*f
         D2=kron(diags([np.ones(n-2),-2*np.ones(n-2),np.ones(n-2)],[0,1,2],shape=(n-2,n)),eye(7),format='csr')*6.0*f*f
         def temporal_fun(z):
             qs=z.reshape(n,7)
-            return np.r_[np.concatenate([o.fun(q) for o,q in zip(objectives,qs)]),D1@z,D2@z]
+            value=np.r_[np.concatenate([o.fun(q) for o,q in zip(objectives,qs)]),D1@z,D2@z]
+            cost=float(value@value)
+            if checkpoint is not None and cost<saved.get('temporal_cost',float('inf')):saved.update(temporal_z=z.tolist(),temporal_cost=cost)
+            return value
         def temporal_jac(z):
             qs=z.reshape(n,7)
             return vstack([block_diag([o.jac(q) for o,q in zip(objectives,qs)],format='csr'),D1,D2],format='csr')
         if progress:progress(side,'temporal_fit',0,n)
-        smooth=least_squares(temporal_fun,np.clip(out[:,ids],lo+1e-5,hi-1e-5).ravel(),jac=temporal_jac,
+        initial=np.asarray(saved['temporal_z']) if 'temporal_z' in saved else np.clip(out[:,ids],lo+1e-5,hi-1e-5).ravel()
+        smooth=least_squares(temporal_fun,initial,jac=temporal_jac,
             bounds=(np.tile(lo,n),np.tile(hi,n)),max_nfev=22,ftol=1e-5,xtol=1e-5,gtol=1e-4,
             tr_solver='lsmr',tr_options={'maxiter':60},x_scale='jac')
         timings['temporal_fit_s']=time.perf_counter()-phase_start;phase_start=time.perf_counter()
@@ -232,6 +259,7 @@ def plan_and_refine(robot,t,xs,cfg,progress=None,_only_sides=None):
             'event_tracking_eligible':side_event,
             'max_knot_step_deg':float(np.rad2deg(np.max(abs(np.diff(path,axis=0))))),
             'max_final_step_deg':float(np.rad2deg(np.max(abs(np.diff(out[:,ids],axis=0)))))}
+        if checkpoint is not None:saved.update(complete=out[:,ids].tolist(),report=report[side])
         if progress:progress(side,'refined',n,n)
     if event_tracking:
         for side,g in robot.sides.items():

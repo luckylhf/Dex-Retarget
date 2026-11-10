@@ -96,3 +96,48 @@ def test_clip_endpoint_can_improve_without_an_external_join(scene,monkeypatch):
     monkeypatch.setattr(local,'_floor',lambda *args:0.)
     out,_=local.fit_window(robot,t,x,cfg,0,len(x))
     assert out[0,j]>.05 and out[-1,j]>.05
+
+
+def test_distant_branch_seed_can_join_without_trust_region_infeasibility(scene,monkeypatch):
+    robot,t,x,cfg=scene;j=robot.sides['Left']['arm'][0]
+    target=x.copy();target[3:8,j]=1.5
+    class Objective:
+        def __init__(self,robot,t,i,cfg):self.i=i
+        def evaluate(self,q):return 10*(q-target[self.i]),10*np.eye(32)
+    monkeypatch.setattr(local,'Objective',Objective)
+    monkeypatch.setattr(local,'_floor',lambda *args:0.)
+    out,report=local.fit_window(robot,t,x,cfg,1,10,ids_override=[j],seed=target)
+    assert report['seed_projection'] is not None
+    assert out[5,j]>.1
+    np.testing.assert_array_equal(out[:3],x[:3]);np.testing.assert_array_equal(out[8:],x[8:])
+    assert np.max(abs(np.diff(out[:,3:],axis=0))-robot.joint_step(50.,cfg))<1e-7
+
+
+def test_float32_fixed_join_roundoff_is_not_false_infeasibility(scene,monkeypatch):
+    robot,t,x,cfg=scene;j=robot.sides['Left']['arm'][0];step=robot.joint_step(50,cfg)[j-3]
+    x[2,j]=step+3e-8;target=x.copy();target[3:8,j]=1.
+    class Objective:
+        def __init__(self,robot,t,i,cfg):self.i=i
+        def evaluate(self,q):return 10*(q-target[self.i]),10*np.eye(32)
+    monkeypatch.setattr(local,'Objective',Objective);monkeypatch.setattr(local,'_floor',lambda *args:0.)
+    out,report=local.fit_window(robot,t,x,cfg,1,10,ids_override=[j],seed=target)
+    np.testing.assert_array_equal(out[:3],x[:3]);np.testing.assert_array_equal(out[8:],x[8:])
+    assert out[5,j]>.1
+    assert np.max(abs(np.diff(out[:,j]))-step)<=1e-7
+
+
+def test_unchanged_motor_valid_input_is_not_rejected_by_numeric_step_cap(scene,monkeypatch):
+    robot,t,x,cfg=scene;j=robot.sides['Left']['arm'][4]
+    numeric=robot.joint_step(50,cfg)[j-3];physical=robot.speed_limits[j-3]/50
+    assert physical>numeric
+    fast=(numeric+physical)/2
+    # One unchanged outside interval, and one immutable join interval.
+    x[0,j]=-fast;x[2,j]=fast;target=x.copy();target[4:7,j]=.6
+    class Objective:
+        def __init__(self,robot,t,i,cfg):self.i=i
+        def evaluate(self,q):return 10*(q-target[self.i]),10*np.eye(32)
+    monkeypatch.setattr(local,'Objective',Objective);monkeypatch.setattr(local,'_floor',lambda *args:0.)
+    out,_=local.fit_window(robot,t,x,cfg,1,10,ids_override=[j],seed=target)
+    np.testing.assert_array_equal(out[:3],x[:3]);np.testing.assert_array_equal(out[8:],x[8:])
+    assert np.max(abs(np.diff(out[:,j])))<=physical+2e-6
+    assert np.max(abs(np.diff(out[2:9,j])))<=numeric+2e-6

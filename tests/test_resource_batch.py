@@ -112,7 +112,7 @@ def setup(tmp_path,monkeypatch):
         p=tmp_path/(name+'.bvh');p.write_text(f'{name}\nFrames: 181\nFrame Time: 0.033333\n')
         cases.append(dict(id=name,input=p.name,input_sha256=sha(p),source='lafan'))
     manifest=tmp_path/'manifest.json';manifest.write_text(json.dumps(dict(cases=cases)))
-    return argparse.Namespace(manifest=manifest,output=tmp_path/'out',workers=32,mode='auto',budget=30.,memory_reserve_gib=10.,disk_reserve_gib=80.,worker_peak_gib=3.,resource_wait=.01,iterations=8,initial_iterations=100,frax_timeout=None,v8_timeout=None)
+    return argparse.Namespace(pipeline='two-stage',manifest=manifest,output=tmp_path/'out',workers=32,mode='auto',budget=30.,memory_reserve_gib=10.,disk_reserve_gib=80.,worker_peak_gib=3.,resource_wait=.01,iterations=8,initial_iterations=100,frax_timeout=None,v8_timeout=None)
 
 def test_two_stage_cascade_independence_and_quality_do_not_change(setup):
     result=batch.run(setup,FakeSlot,lambda:snapshot(17))
@@ -373,3 +373,17 @@ def test_refill_pss_sampling_is_linear_and_status_is_lightweight(setup,monkeypat
     assert all(not records for name,records in writes if name=='batch.running.json')
     live=json.loads((setup.output/'batch.running.json').read_text())
     assert live['counts']=={'accepted':32} and live['active']==[]
+
+
+def test_unified_batch_default_keeps_resource_controls_and_does_not_enqueue_v8(setup):
+    del setup.pipeline
+    class Unified(FakeSlot):
+        def start(self,job,timeout):
+            assert job['arguments']['mode']=='frax' and job['arguments']['unified_repair']
+            super().start(job,timeout)
+    result=batch.run(setup,Unified,lambda:snapshot(17))
+    assert all(mode=='frax' for _,mode,_ in Unified.calls)
+    assert [r['status'] for r in result]==['accepted','review','review','review','input_error']
+    saved=json.loads((setup.output/'batch.json').read_text())
+    assert saved['stage_order']==['frax'] and saved['pipeline']=='unified'
+    assert saved['resources']['stage_barriers'] is False

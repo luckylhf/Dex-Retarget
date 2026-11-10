@@ -11,9 +11,9 @@ from dex_frax.resources import GIB
 def test_duration_uses_source_time_not_resampled_frames(tmp_path):
     path=tmp_path/'motion.bvh';path.write_text('Frames: 7200\nFrame Time: 0.008333333333333333333333333334\n')
     assert duration_seconds(path)>=Decimal(60)
-    assert route('auto',Decimal('59.999'))==('frax','v8')
-    assert route('auto',Decimal(60))==('frax','v8')
-    assert route('auto',Decimal(600),single=True)==('frax','v8')
+    assert route('auto',Decimal('59.999'),pipeline='two-stage')==('frax','v8')
+    assert route('auto',Decimal(60),pipeline='two-stage')==('frax','v8')
+    assert route('auto',Decimal(600),single=True,pipeline='two-stage')==('frax','v8')
     assert route('v8',Decimal(600))==('v8',)
     with pytest.raises(ValueError,match='Unknown conversion mode'):route('hybrid',Decimal(1))
 

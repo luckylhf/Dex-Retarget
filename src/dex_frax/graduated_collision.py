@@ -45,8 +45,9 @@ def seam_floor(robot,t,xs,a,b):
                 minimum=min(minimum,float((shape['hull']@robot.rot(body)[2]+robot.point(body)[2]).min()))
     return minimum
 
-def recover(robot,t,xs,solver_cfg,config,report,fast=False):
+def recover(robot,t,xs,solver_cfg,config,report,fast=False,reference=None):
     if not report.get('after',{}).get('collision_samples',0):return xs,report
+    reference=xs if reference is None else reference
     begin=time.perf_counter();out=xs.copy();attempts=[];attempted_frames=0
     model=IncrementalRecovery(robot,config);n=len(xs);fps=float(t['fps'])
     limit=max(20,min(120,round(2.4*fps)));overlap=min(limit//3,max(2,round(.4*fps)))
@@ -63,7 +64,10 @@ def recover(robot,t,xs,solver_cfg,config,report,fast=False):
             jobs.append(dict(start=lo,end=hi,sides=old['sides'],tried=[],done=False,
                 freeze_start=left,freeze_end=right))
     budget=600 if fast else None
-    for tier in TIERS:
+    from .arm_policy import enabled,collision_options,active_arm_support
+    for job in jobs:
+        job['whole_arm']=enabled(solver_cfg) and not active_arm_support(robot,t,job['start'],job['end'])
+    for tier_index in range(3):
         pending=[]
         for job in jobs:
             a,b=job['start'],job['end'];before,_,_=scan(model,out[a:b],t['root_r'][a:b],8)
@@ -72,6 +76,7 @@ def recover(robot,t,xs,solver_cfg,config,report,fast=False):
         # Every region receives this tier before any region gets the next tier.
         for _,job in sorted(pending,key=lambda v:v[0]):
             a,b=job['start'],job['end']
+            tier=collision_options((10.,20.,30.)[tier_index],(10,16,24)[tier_index]) if job['whole_arm'] else TIERS[tier_index]
             if b-a<3 or (budget is not None and attempted_frames+b-a>budget):
                 attempts.append(dict(start=a,end=b,tier=tier['name'],status='deferred',reason='fast_repair_work_budget'));continue
             attempted_frames+=b-a;job['tried'].append(tier['name'])
@@ -81,7 +86,7 @@ def recover(robot,t,xs,solver_cfg,config,report,fast=False):
             internal=not(job['freeze_start'] and job['freeze_end'])
             try:
                 candidate,success=_repair_window(model,t,seed,solver_cfg,a,b,job['sides'],options=dict(tier,
-                    _reference=xs,_scratch=scratch,freeze_start=job['freeze_start'],freeze_end=job['freeze_end'],internal_overlap=internal))
+                    _reference=reference,_scratch=scratch,freeze_start=job['freeze_start'],freeze_end=job['freeze_end'],internal_overlap=internal))
                 checked,_,_=scan(model,candidate[a:b],t['root_r'][a:b],8)
                 if checked['collision_samples']:raise ValueError('dense_interpolated_collision')
                 # An unresolved neighbor may remain unresolved; a repaired seam
@@ -109,7 +114,7 @@ def recover(robot,t,xs,solver_cfg,config,report,fast=False):
         if check['collision_samples']:unresolved.append({k:v for k,v in job.items() if k not in ('seed','done')})
     all_tried=bool(unresolved) and all(len(j['tried'])==len(TIERS) for j in unresolved)
     outcome='repaired' if not final['collision_samples'] else ('tiers_exhausted' if all_tried else 'deferred')
-    report['graduated_repair']=dict(policy='gesture_capped_overlap_tiers_v2',tiers=TIERS,attempts=attempts,
+    report['graduated_repair']=dict(policy='gesture_capped_overlap_tiers_v2',tiers=([collision_options(v) for v in (10.,20.,30.)] if enabled(solver_cfg) else TIERS),support_tiers=TIERS,attempts=attempts,
         outcome=outcome,unresolved_windows=unresolved,all_unresolved_tried_all_tiers=all_tried,
         used_windows=len(jobs),used_frames=sum(j['end']-j['start'] for j in jobs),attempted_frames=attempted_frames,
         maximum_attempted_frames=budget,maximum_window_frames=limit,

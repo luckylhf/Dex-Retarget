@@ -6,7 +6,7 @@ from dex_frax.cli import single_auto
 
 def test_long_single_file_runs_complete_frax_then_independent_v8(tmp_path):
     source=tmp_path/'long.bvh';source.write_text('Frames: 6001\nFrame Time: 0.02\n')
-    args=argparse.Namespace(input=source,output=tmp_path/'out',source='lafan',mode='auto',
+    args=argparse.Namespace(pipeline='two-stage',input=source,output=tmp_path/'out',source='lafan',mode='auto',
         iterations=8,initial_iterations=100,max_frames=None,budget=30.)
     class Worker:
         calls=[]

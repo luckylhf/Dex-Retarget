@@ -1,4 +1,4 @@
 CONVERTER = "dex_frax"
-CONVERTER_RELEASE = "dex_frax_0.8.1_dynamic_host_admission_20261106"
-SOLVER_POLICY = "frax_blocked_ik_local_arms_tier_rounds_v8"
-QUALITY_POLICY = "common_pose_speed_collision_plus_1mm_geometry_v2"
+CONVERTER_RELEASE = "dex_frax_0.8.1_fast_refine_20261110"
+SOLVER_POLICY = "frax_fast_persistent_window_refine_v20"
+QUALITY_POLICY = "scoped_collision_support_temporal_v6"

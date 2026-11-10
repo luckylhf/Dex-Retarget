@@ -78,6 +78,29 @@ def test_actual_small_tier_clears_geometry_with_gesture_caps(actual_scene):
     assert np.all(abs(np.diff(out[:,3:],axis=0))<=r.joint_step(t['fps'],cfg['solver'])+2e-6)
 
 
+def test_whole_arm_collision_clears_real_geometry_without_moving_waist(actual_scene):
+    from dex_frax.arm_policy import POLICY,collision_options
+    from dex_frax.v8.self_collision import CollisionModel,scan,_repair_window
+    r,t,x,cfg=actual_scene;weights=dict(cfg['solver'],arm_repair_policy=POLICY)
+    candidate=None
+    for tier in (10.,20.,30.):
+        try:
+            candidate,_=_repair_window(g.IncrementalRecovery(r),t,x,weights,0,len(x),list(r.sides),
+                                      options=dict(collision_options(tier,24),_reference=x))
+            break
+        except ValueError:pass
+    assert candidate is not None
+    assert scan(CollisionModel(r),candidate,t['root_r'],8)[0]['collision_samples']==0
+    arm=np.asarray(sum([v['arm'] for v in r.sides.values()],[]))
+    fixed=np.setdiff1d(np.arange(x.shape[1]),arm)
+    np.testing.assert_array_equal(candidate[:,fixed],x[:,fixed])
+    shoulders=sum([v['arm'][:3] for v in r.sides.values()],[])
+    assert np.max(abs(candidate[:,shoulders]-x[:,shoulders]))<=np.deg2rad(tier)+2e-6
+    assert np.all(candidate[:,3:]>=r.lower[3:]-2e-6)
+    assert np.all(candidate[:,3:]<=r.upper[3:]+2e-6)
+    assert np.all(abs(np.diff(candidate[:,3:],axis=0))<=r.joint_step(t['fps'],weights)+2e-6)
+
+
 def test_actual_coupled_repair_preserves_fixed_material_contact(actual_scene):
     import copy
     from dex_frax.v8.self_collision import CollisionModel,scan,_repair_window
@@ -109,3 +132,46 @@ def test_wall_time_does_not_spend_normal_iteration_budget(actual_scene,monkeypat
     out,result=g.recover(r,t,original,cfg['solver'],cfg['self_collision'],report)
     assert result['after']['collision_samples']==0
     assert c.scan(c.CollisionModel(r),out,t['root_r'],8)[0]['collision_samples']==0
+
+
+def test_actual_leg_subset_keeps_root_waist_and_arms_exact(actual_scene):
+    import copy
+    from dex_frax.refine_routing import collision_groups,submodel
+    from dex_frax.v8.self_collision import CollisionModel,_repair_window
+    r,t,x,cfg=actual_scene;t=copy.deepcopy(t);n=len(x)
+    rep=lambda v:np.repeat(np.asarray(v)[None],n,axis=0)
+    r.set(x[0],t['root_r'][0]);t.update(root_p=x[:,:3].copy(),torso_r=rep(r.rot(r.torso)))
+    for side,g in r.sides.items():
+        direction=lambda a,b:rep((r.point(b)-r.point(a))/np.linalg.norm(r.point(b)-r.point(a)))
+        t['sides'][side].update(thigh=direction(g['hip'],g['knee']),shin=direction(g['knee'],g['foot']),
+            foot_target_p=rep(r.point(g['foot'])),foot_target_r=rep(r.rot(g['foot'])),contact=np.zeros(n),
+            pivots=rep(g['sole']),anchors=np.zeros((n,3)),ground_contact_confidence=np.zeros(n))
+    full=CollisionModel(r,dict(cfg['self_collision'],coverage='full'));model=submodel(full,collision_groups(full)['leg_collision'])
+    ids=sum([g['leg'] for g in r.sides.values()],[]);progress={}
+    out,report=_repair_window(model,t,x,cfg['solver'],0,n,list(r.sides),dict(coupled=True,_moving_ids=ids,
+        _reference=x,_progress=progress,body_joint_deg=5.,joint_deg=0.,root_position_m=0.,
+        whole_arm=True,gesture_caps_active=False,iterations=4))
+    fixed=np.setdiff1d(np.arange(32),ids)
+    assert np.array_equal(out[:,fixed],x[:,fixed])
+    assert progress['window_qp']['ids']==ids and progress['window_qp']['iteration']>0
+    assert np.all(abs(np.diff(out[:,ids],axis=0))*t['fps']<=r.speed_limits[np.asarray(ids)-3]+1e-4)
+
+
+def test_branch_search_resumes_after_completed_knots_and_preserves_completed_side(actual_scene,monkeypatch):
+    import copy
+    from dex_frax.v8 import arms
+    r,t,x,cfg=actual_scene;state={};weights=dict(cfg['solver'],arm_event_tracking=False,_branch_progress=state)
+    factory=arms.arm_objective
+    def interrupt(*args,**kwargs):
+        if state.get('Left',{}).get('nodes'):raise TimeoutError('test_slice')
+        return factory(*args,**kwargs)
+    monkeypatch.setattr(arms,'arm_objective',interrupt)
+    with pytest.raises(TimeoutError):arms.plan_and_refine(r,t,x,weights,_only_sides={'Left'})
+    first=copy.deepcopy(state['Left']['nodes'][0])
+    monkeypatch.setattr(arms,'arm_objective',factory)
+    out,_=arms.plan_and_refine(r,t,x,weights,_only_sides={'Left'})
+    assert state['Left']['nodes'][0]==first and state['Left']['frame_next']==len(x)
+    assert 'complete' in state['Left']
+    monkeypatch.setattr(arms,'arm_objective',lambda *a,**k:pytest.fail('completed side was searched again'))
+    repeated,_=arms.plan_and_refine(r,t,x,weights,_only_sides={'Left'})
+    np.testing.assert_array_equal(out,repeated)

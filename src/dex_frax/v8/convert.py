@@ -28,13 +28,15 @@ def support_solver(cfg):
     if mode=='legacy_slsqp':return legacy_support
     raise ValueError('Unknown support_refinement: '+str(mode))
 
-def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,max_frames=None,no_contacts=False,initial_solver=None,refine=True,prepared_input=None):
+def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,max_frames=None,no_contacts=False,initial_solver=None,refine=True,prepared_input=None,unified_repair=False,repair_similarity='soft',profile=None,repair_budget=None,continue_from=None,resume_recheck=False,allow_local_slowdown=False,bvh_units='cm',bvh_translations='absolute'):
     from ..resource_events import phase
     phase('preprocessing',compile_possible=initial_solver is not None and not getattr(initial_solver,'strict',False))
     start=time.monotonic();output=Path(output)
     output.parent.mkdir(parents=True,exist_ok=True)
     if output.exists():raise FileExistsError('Refusing to overwrite '+str(output))
     cfg=json.loads((ROOT/'config.json').read_text()) if config is None else json.loads(Path(config).read_text())
+    from ..arm_policy import POLICY as ARM_POLICY
+    if unified_repair and repair_similarity=='soft':cfg['solver']['arm_repair_policy']=ARM_POLICY
     constrain_support=support_solver(cfg['solver'])
     from ..input_errors import MotionInputError
     try:
@@ -44,13 +46,22 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
             motion=load_smplx(prepared_input,fps=fps)
             source_targets=adapt_smplx(motion)
         else:
-            motion=load(bvh,fps=fps)
+            motion=load(bvh,fps=fps,units=bvh_units,translations=bvh_translations)
             if max_frames:motion.local_p=motion.local_p[:max_frames];motion.local_r=motion.local_r[:max_frames]
             if len(motion.local_p)<3:raise ValueError('Conversion needs at least 3 frames; one-frame poses are calibration-only')
             source_targets=adapt(motion,source)
     except (ValueError,KeyError,IndexError,StopIteration) as error:
         raise MotionInputError(str(error)) from error
     robot=Robot(model);configure(robot,cfg['anatomy']);t=prepare(source_targets,robot,cfg['contact'],enabled=not no_contacts)
+    timing=None;source_time=None
+    if allow_local_slowdown:
+        if profile!='refine':raise ValueError('Local slowdown requires explicit refine mode')
+        from ..retiming import apply as retime
+        gates=json.loads(ROOT.parent.joinpath('quality_pose.json').read_text())
+        t,source_time,timing=retime(t,robot,.975*gates['root_angular_speed_rad_s'],.975*gates['root_speed_m_s'])
+        np.savez_compressed(output.with_suffix('.time_map.npz'),output_time_s=np.arange(len(source_time))/motion.fps,
+            source_time_s=source_time,source_frame_float=source_time*motion.input_fps,source_fps=motion.input_fps,
+            source_sha256=sha(bvh),frame_convention='zero_based_input',policy=timing['policy'])
     if getattr(initial_solver, 'improved', False):
         from ..contact_transition import refine as refine_transitions
         initial_solver.report['contact_transitions']=refine_transitions(t,robot)
@@ -61,7 +72,9 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
     if initial_solver is None:phase('v8_ik')
     x,records=(solve if initial_solver is None else initial_solver)(robot,t,cfg['solver'],lambda i,n:print(f'{output.stem}: {i}/{n} {time.monotonic()-start:.1f}s',flush=True))
     stage_times['initial_ik']=time.monotonic()-stage_start
-    initial_x=x.copy()
+    if hasattr(initial_solver,'baseline'):
+        np.savez_compressed(output.with_suffix('.raw_frax.npz'),x=initial_solver.baseline,root_r=t['root_r'],fps=motion.fps)
+    initial_x=x.copy();collision_reference=None
     if refine:
         phase('support')
         stage_start=time.monotonic()
@@ -93,6 +106,13 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
             x,local_report=refine_local(robot,t,x,cfg['solver'])
             initial_solver.report['local_refinement']=local_report
             stage_times['local_pose']=time.monotonic()-stage_start
+            if unified_repair and repair_similarity=='soft':
+                from ..torso_branch import recover as recover_torso_branch
+                stage_start=time.monotonic()
+                x,branch_report=recover_torso_branch(robot,t,x,cfg['solver'],cfg.get('self_collision'))
+                initial_solver.report['torso_branch_recovery']=branch_report
+                stage_times['torso_branch']=time.monotonic()-stage_start
+                np.savez_compressed(output.with_suffix('.branch.npz'),x=x,root_r=t['root_r'],fps=motion.fps)
             from ..adaptive_refine import refine as refine_adaptive
             stage_start=time.monotonic()
             x,adaptive_report=refine_adaptive(robot,t,x,cfg['solver'])
@@ -104,9 +124,10 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
             stage_times['adaptive_v8']=time.monotonic()-stage_start
             stage_start=time.monotonic()
             from ..fast_collision import refine as refine_fast_collision
+            collision_reference=x.copy()
             x,collision_report=refine_fast_collision(robot,t,x,cfg['solver'],cfg.get('self_collision'))
             from ..graduated_collision import recover
-            x,collision_report=recover(robot,t,x,cfg['solver'],cfg.get('self_collision'),collision_report,fast=True)
+            x,collision_report=recover(robot,t,x,cfg['solver'],cfg.get('self_collision'),collision_report,fast=True,reference=collision_reference)
             stage_times['self_collision']=time.monotonic()-stage_start
     phase('export_check')
     np.savez_compressed(output.with_suffix('.initial.npz'),x=initial_x,root_r=t['root_r'],fps=motion.fps,joint_names=robot.names,solver_records=np.asarray(records))
@@ -116,6 +137,7 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
     payload={'fps':motion.fps,'root_pos':x[:,:3].astype(np.float32),'root_rot':quat.astype(np.float32),
         'dof_pos':x[:,3:].astype(np.float32),'joint_names':robot.names,'quat_order':'xyzw',
         'local_body_pos':None,'link_body_list':None,'model_sha256':sha(robot.path),'robot':'tienkung_dex_29'}
+    if source_time is not None:payload.update(source_time_s=source_time,source_frame_float=source_time*motion.input_fps,source_fps=motion.input_fps)
     collision_report['export_check']=audit_self_collision(robot,payload,cfg.get('self_collision'))
     from ..quality_v8 import adjacent_speed_report
     velocity_check = adjacent_speed_report(payload['dof_pos'], motion.fps, robot.names, robot.speed_limits)
@@ -124,6 +146,7 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
     output.write_bytes(pickle.dumps(payload,protocol=4))
     np.savez_compressed(output.with_suffix('.npz'),**{k:v for k,v in payload.items() if v is not None})
     diagnostics={'root_target':t['root_p'],'root_r':t['root_r'],'torso_target':t['torso_r'],'solver_records':records}
+    if source_time is not None:diagnostics['source_time_s']=source_time
     support_stats=getattr(robot,'support_fast_report',None)
     if support_stats is not None:
         diagnostics['support_route']=np.array([{'bypass':0,'light':1,'fallback':2}[v['route']] for v in support_stats['frames']],dtype=np.uint8)
@@ -141,8 +164,10 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
         for k in ['mode','confidence','anchors','source_surface_height','source_surface_point']:diagnostics['body_'+contact['body_name']+'_'+k]=contact[k]
     np.savez_compressed(output.with_suffix('.diagnostics.npz'),**diagnostics)
     from ..identity import CONVERTER_RELEASE,SOLVER_POLICY
-    meta={'converter_version':8,'generation_mode':'frax_v8_from_original_bvh' if initial_solver is not None else 'v8_reference_from_original_bvh','pose_solver':'frax_diff_ik' if initial_solver is not None else 'v8_trf','converter_release':CONVERTER_RELEASE,'solver_policy':SOLVER_POLICY,
+    meta={'profile':profile,'converter_version':8,'generation_mode':'frax_v8_from_original_bvh' if initial_solver is not None else 'v8_reference_from_original_bvh','pose_solver':'frax_diff_ik' if initial_solver is not None else 'v8_trf','converter_release':CONVERTER_RELEASE,'solver_policy':SOLVER_POLICY,
         'input':str(Path(bvh).resolve()),'input_sha256':sha(bvh),'source_type':t['source_type'],
+        'bvh_input_convention':None if source=='smplx' else dict(units=bvh_units,translations=bvh_translations),
+        'support_solver_execution':dict(executed=bool(refine),scope='legacy_support_postprocess',status='executed' if refine else 'not_run',window_repairs='repair.json' if unified_repair else None),
         'input_frames':motion.input_frames,'input_fps':motion.input_fps,'output_frames':len(x),'output_fps':motion.fps,
         'model':robot.path,'model_sha256':sha(robot.path),'viewer_urdf':DEFAULT_URDF,'viewer_urdf_sha256':sha(DEFAULT_URDF),
         'joint_names':robot.names,'quat_order':'xyzw','units':'metres/radians','cpu_only':True,
@@ -166,14 +191,19 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
         'stage_times_s':stage_times,'frax':getattr(initial_solver,'report',None),'v8_refinement':refine,'elapsed_s':time.monotonic()-start,'output_sha256':sha(output),
         'code_sha256':{str(p.relative_to(ROOT)):sha(p) for p in sorted(list(ROOT.glob('*.py'))+[ROOT/'config.json'])},
         'limits':'Kinematic reference only; contact inferred; flat floor assumed; no dynamics/self-collision certification.'}
+    if timing is not None:meta['retiming']=dict(timing,time_map='motion.time_map.npz',source_time_sha256=sha(output.with_suffix('.time_map.npz')))
     if source == 'smplx':
         meta.update(generation_mode='smplx_parameters_to_dex',input_adapter=motion.metadata)
     output.with_suffix('.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2))
+    if unified_repair:
+        if refine or initial_solver is None:raise ValueError('Unified repair requires the complete Frax backbone')
+        if profile=='refine':
+            from ..refine_pipeline import repair_output
+            meta=repair_output(robot,t,x,meta,payload,output,initial_solver,repair_budget=repair_budget,continue_from=continue_from,resume_recheck=resume_recheck)
+        else:
+            from ..unified_repair import repair_output
+            meta=repair_output(robot,t,x,meta,payload,output,initial_solver,repair_similarity,collision_reference=collision_reference)
     return meta
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('bvh');p.add_argument('output');p.add_argument('--source',choices=['auto','soma','lafan','mocap'],default='auto')
-    p.add_argument('--model',default=DEFAULT_MODEL);p.add_argument('--fps',type=float,default=None,help='Default preserves source fps; resampling uses local-rotation SLERP')
-    p.add_argument('--config');p.add_argument('--max-frames',type=int);p.add_argument('--no-contacts',action='store_true',help='Ablation only')
-    a=p.parse_args();m=convert(**vars(a));print(json.dumps({k:m[k] for k in ('output_frames','output_fps','elapsed_s')},ensure_ascii=False))
+    raise SystemExit('Use dex-frax convert --mode fast or --mode refine; standalone V8 conversion entry removed')

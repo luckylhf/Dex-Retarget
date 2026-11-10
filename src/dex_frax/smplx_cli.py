@@ -21,11 +21,24 @@ def add_options(parser):
 def prepare(args, directory, timeout=None):
     from .input_errors import MotionInputError
     from .cli import sha
+    if getattr(args,'continue_from',None) is not None and getattr(args,'smplx_prepared',None) is None:
+        from .refine_resume import locate
+        previous=locate(args.continue_from)
+        cached=next((p for p in (previous/'input/human.npz',previous.parent/'input/human.npz') if p.exists()),None)
+        if cached is None:raise MotionInputError('Continuation SMPL-X prepared geometry missing')
+        args.smplx_prepared=str(cached);args.smplx_prepared_sha256=sha(cached)
     prepared = getattr(args,'smplx_prepared',None)
     if prepared is not None:
         if sha(prepared)!=args.smplx_prepared_sha256:
             raise MotionInputError('Prepared SMPL-X input changed')
-        return Path(prepared)
+        # Each continuation is self-contained for the next hop. Preserve the
+        # exact prepared bytes and therefore the calibration/identity contract.
+        import shutil
+        dest=Path(directory)/'input'/'human.npz';dest.parent.mkdir(parents=True,exist_ok=True)
+        if Path(prepared).resolve()!=dest.resolve():shutil.copyfile(prepared,dest)
+        if sha(dest)!=args.smplx_prepared_sha256:raise MotionInputError('Copied SMPL-X geometry differs')
+        args.smplx_prepared=str(dest)
+        return dest
     if not getattr(args,'body_models',None):
         raise MotionInputError('SMPL-X requires --body-models (parent of smplx/SMPLX_GENDER.npz)')
     dest = Path(directory)/'input'/'human.npz'
@@ -67,7 +80,8 @@ def check_input(args):
 def single_auto(args,worker_factory=None):
     """Reuse the geometry once; bound owned solver workers with the same budget."""
     from .cli import atomic_json,sha
-    from .cascade import Worker,accepted_artifact,STAGES
+    from .cascade import Worker,accepted_artifact
+    from .dispatch import pipeline_stages,use_unified
     out=Path(args.output).resolve();out.mkdir(parents=True,exist_ok=False)
     started=time.monotonic();attempts=[];selected=None;status='running';preview=None
     atomic_json(out/'run.json',dict(status=status,mode='auto',source='smplx'))
@@ -75,12 +89,12 @@ def single_auto(args,worker_factory=None):
     try:
         prepare(args,out,timeout=args.budget)
         worker=(worker_factory or Worker)()
-        for mode in STAGES:
+        for mode in pipeline_stages(args):
             remaining=args.budget-(time.monotonic()-started)
             if remaining<=0: status='budget_exhausted';break
             stage=out/mode
             options=vars(args).copy();options.update(output=str(stage),input=str(Path(args.input).resolve()),mode=mode)
-            options.update(reuse_initial_from=None,require_initial_reuse=False,legacy_frax=False)
+            options.update(reuse_initial_from=None,require_initial_reuse=False,legacy_frax=getattr(args,'profile',None) in ('fast','refine'),unified_repair=use_unified(args))
             result=worker.run(dict(input=str(args.input),input_sha256=sha(args.input),log=str(out/(mode+'.log')),arguments=options),remaining)
             attempts.append(dict(mode=mode,**result))
             artifact=accepted_artifact(stage,result)
@@ -95,7 +109,7 @@ def single_auto(args,worker_factory=None):
         raise
     finally:
         if worker is not None: worker.close()
-    record=dict(status=status,selected_mode=selected,selected_output=selected,
+    record=dict(status=status,pipeline=getattr(args,'pipeline','unified'),selected_mode=selected,selected_output=selected,
                 preview_output=preview,training_npz=f'{selected}/training.npz' if selected else None,attempts=attempts)
     atomic_json(out/'selection.json',record)
     atomic_json(out/'accepted.json',dict(motions=[] if not selected else [dict(id='motion',training_npz=record['training_npz'],

@@ -128,7 +128,7 @@ def _stage(robot, t, xs, weights, stage):
             target['repair_lower_bounds'] = corridor
         if stage == 'body':
             def objective_factory(robot, target, i, weights, previous, predicted):
-                return MinimumChangeObjective(xs[i])
+                return __import__('dex_frax.v8.solver',fromlist=['Objective']).Objective(robot,target,i,weights,previous,predicted) if weights.get('_repair_trusted_support') else MinimumChangeObjective(xs[i])
             result, report = fn(robot, target, xs, weights, objective_factory=objective_factory)
         else:
             result, report = fn(robot, target, xs, weights)
@@ -145,9 +145,10 @@ def _stage(robot, t, xs, weights, stage):
 def check_candidate(robot, t, before, after, weights, cfg, original_metrics):
     if not np.isfinite(after).all():
         raise ValueError('nonfinite_candidate')
-    if np.any(after[:,3:] < robot.lower[3:]-1e-7) or np.any(after[:,3:] > robot.upper[3:]+1e-7):
+    joint_tolerance=np.deg2rad(json.loads(Path(__file__).with_name('quality_pose.json').read_text())['joint_limit_tolerance_deg'])
+    if np.any(after[:,3:] < robot.lower[3:]-joint_tolerance) or np.any(after[:,3:] > robot.upper[3:]+joint_tolerance):
         raise ValueError('joint_limit_regression')
-    if np.max(abs(np.diff(after[:,3:],axis=0))-robot.joint_step(t['fps'],weights)) > 1e-7:
+    if np.max(abs(np.diff(after[:,3:],axis=0))*t['fps']-robot.speed_limits) > 1e-4:
         raise ValueError('join_or_velocity_failure')
     knees = [g['leg'][3] for g in robot.sides.values()]
     if np.any((before[:,knees] >= 0.) & (after[:,knees] < -1e-7)):

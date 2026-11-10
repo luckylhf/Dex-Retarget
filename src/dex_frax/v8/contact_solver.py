@@ -61,10 +61,19 @@ def refine(robot,t,xs,cfg,progress=None,objective_factory=None):
         summary['maximum_constraint_excess']=max(summary['maximum_constraint_excess'],info['constraint_excess'])
         return delta,info
     for i,base in enumerate(xs):
+        if cfg.get('_repair_deadline') is not None:
+            import time
+            if time.monotonic()>=cfg['_repair_deadline']:raise TimeoutError('body_window_deadline')
         robot.set(base,t['root_r'][i])
         body_contacts=[v for v in t['body_contacts'] if v['mode'][i]>0]
         minima={b:robot.point(b,lowest(robot,b))[2] for b in robot.surface_models}
         needed=any(z<-1e-5 for b,z in minima.items() if b not in feet)
+        if cfg.get('_repair_trusted_support'):
+            from .multicontact import contact_local
+            for c in body_contacts:
+                if c['confidence'][i]*c.get('source_geometry_confidence',0.)<.8:continue
+                point=robot.point(c['body'],contact_local(robot,c))
+                needed|=abs(point[2])>t['body_contact_height_tolerance_m'] or (c['mode'][i]==1 and np.linalg.norm(point[:2]-c['anchors'][i,:2])>t['body_contact_height_tolerance_m'])
         if previous is not None:
             needed=needed or np.any(abs(base[3:]-previous[3:])>step+1e-8)
             # Decay a prior correction through free frames; jumping straight
@@ -75,12 +84,13 @@ def refine(robot,t,xs,cfg,progress=None,objective_factory=None):
         factory=Objective if objective_factory is None else objective_factory
         obj=factory(robot,t,i,cfg,previous,predicted)
         lo=robot.lower.copy();hi=robot.upper.copy()
+        if cfg.get("_pelvis_height_only"):lo[:2]=hi[:2]=xs[i,:2]
         if 'repair_lower_bounds' in t:
             lo=np.maximum(lo,t['repair_lower_bounds'][i])
         if previous is not None:
             lo[3:]=np.maximum(lo[3:],previous[3:]-step+1e-8)
             hi[3:]=np.minimum(hi[3:],previous[3:]+step-1e-8)
-        x=np.clip(base,lo+1e-8,hi-1e-8)
+        x=np.clip(base,lo+np.where(hi>lo+2e-8,1e-8,0.),hi-np.where(hi>lo+2e-8,1e-8,0.))
         contacts={s:v for s,v in t['sides'].items() if v['contact'][i]>0}
         foot_relaxed=False
         def geometry(at):

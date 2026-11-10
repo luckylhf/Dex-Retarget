@@ -37,7 +37,12 @@ def refine(robot, t, xs, solver_cfg, config=None):
             if used_windows >= max_windows or used_frames+b-a > max_frames:
                 raise ValueError('fast_collision_recovery_budget')
             used_windows += 1; used_frames += b-a
-            candidate, detail = _repair_window(model, t, out, solver_cfg, a, b, old['sides'])
+            from .arm_policy import enabled,collision_options
+            options=dict(collision_options(10.),_reference=xs) if enabled(solver_cfg) else None
+            if options is None:
+                candidate, detail = _repair_window(model, t, out, solver_cfg, a, b, old['sides'])
+            else:
+                candidate, detail = _repair_window(model, t, out, solver_cfg, a, b, old['sides'],options=options)
             out = candidate
         except ValueError as exc:
             detail['reason'] = str(exc)

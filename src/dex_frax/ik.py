@@ -32,6 +32,13 @@ def _remember(cache, key, value, capacity):
         cache.popitem(last=False)
 
 
+def initial_branch_count(t):
+    mask=np.asarray(t.get('priority_mask',np.zeros(32,bool)))
+    # Three seeds differ only at shoulder-yaw/elbow-yaw. When all upper joints
+    # are protected, they are projected to the identical state before stepping.
+    return 1 if np.all(mask[18:]) else 3
+
+
 def runtime_keys(robot, t, cfg, iterations, initial_iterations, improved, assets, block_frames=128):
     """Every static residual/constraint input participates in cache identity."""
     geometry = hashlib.sha256()
@@ -40,7 +47,7 @@ def runtime_keys(robot, t, cfg, iterations, initial_iterations, improved, assets
     model = dict(assets=assets, names=robot.names, lower=robot.lower.tolist(),
                  upper=robot.upper.tolist(), speeds=robot.speed_limits.tolist(),geometry=geometry.hexdigest())
     model_key = hashlib.sha256(json.dumps(model,sort_keys=True).encode()).hexdigest()
-    kernel = dict(model=model_key, block_frames=block_frames, algorithm='carried_block_scan_v1',fps=float(t['fps']), weights=cfg,
+    kernel = dict(model=model_key,initial_branches=initial_branch_count(t), foot_geometry=bool(t.get('foot_self_collision',False)), block_frames=block_frames, algorithm='carried_block_scan_v1',fps=float(t['fps']), weights=cfg,
                   iterations=iterations, initial_iterations=initial_iterations, improved=improved,
                   input_shapes=[(list(a.shape[1:]),str(a.dtype)) for a in jax.tree.leaves(targets(t))],
                   contacts=[dict(body=int(c['body']),hull=np.asarray(c.get('robot_hull',robot.surface_models[c['body']]['hull'])).tolist()) for c in t['body_contacts']])
@@ -69,6 +76,9 @@ def targets(t):
             "signed_elbow_bend", "ground_contact_confidence")
     out = {k: np.asarray(t[k]) for k in ("root_p", "root_r", "torso_r")}
     out['body_tolerance'] = np.full(len(t['hips']),float(t['body_contact_height_tolerance_m']))
+    if 'priority_pose' in t:
+        out['priority_pose']=np.asarray(t['priority_pose'])
+        out['priority_mask']=np.broadcast_to(np.asarray(t['priority_mask'],bool),out['priority_pose'].shape).copy()
     out["sides"] = {s: {k: np.asarray(v[k]) for k in keys} for s, v in t["sides"].items()}
     out["body_weights"] = np.stack([
         np.asarray(c["confidence"]) * (np.asarray(c["mode"]) != 0) * c["source_geometry_confidence"]
@@ -82,6 +92,7 @@ def make_residual(model, robot, t, w):
     contacts = [(c["body"], np.asarray(c.get("robot_hull", robot.surface_models[c["body"]]["hull"]))) for c in t["body_contacts"]]
 
     def residual(x, ref):
+        if 'priority_pose' in ref:x=jnp.where(ref['priority_mask'],ref['priority_pose'],x)
         tolerance = ref['body_tolerance']
         tf = model.transforms(x, ref["root_r"])
         p, r = tf[:, :3, 3], tf[:, :3, :3]
@@ -198,12 +209,14 @@ class FraxIK:
             model = DexKinematics(robot)
             parity = model.verify(robot)
             if self.use_cache: _remember(_MODELS,model_key,(model,parity),4)
+        self.report['foot_self_collision_enabled']=bool(t.get('foot_self_collision',False))
         self.report["fk_parity"] = {**parity, 'reused_verified_model': bool(model_hit)}
         refs = targets(t)
         n, fps = len(t["hips"]), float(t["fps"])
         x0 = np.r_[t["root_p"][0], np.zeros(29)]
         for g in robot.sides.values():
             x0[g["arm"][3]], x0[g["leg"][3]] = -.4, .15
+        if 'priority_pose' in t:x0=np.asarray(t['priority_pose'][0]).copy()
         kernel_hit=self.use_cache and kernel_key in _KERNELS
         begin=time.perf_counter()
         if kernel_hit:
@@ -235,6 +248,8 @@ class FraxIK:
         self.report.update(backend='frax_diff_ik_cpu_fp64',frames=n,iterations=self.iterations,
             initial_iterations=self.initial_iterations,prepare_s=prep,compile_s=compile_s,solve_s=solve_s,
             total_s=time.perf_counter()-start,qp_nonconverged_steps=int(records[:,2].sum()),
+            qp_nonconverged_output_frames=np.flatnonzero(records[:,2]>0).tolist(),
+            qp_selected_iteration_count=int(self.initial_iterations+(n-1)*self.iterations),initial_branch_count=initial_branch_count(t),
             max_speed_excess_rad_s=max_speed_excess,residual_rows=rows,root_orientation='prescribed_by_v8',cpu_trf_fallback=False,
             execution=dict(policy='carried_fixed_blocks_v1',block_frames=self.block_frames,blocks=len(poses),state_continuity=True,padded_frames_not_solved=True))
         self.report['runtime_cache']=dict(model_hit=bool(model_hit),kernel_hit=bool(kernel_hit),model_key=model_key,kernel_key=kernel_key,enabled=self.use_cache)
@@ -254,14 +269,21 @@ class FraxIK:
         rows = jax.eval_shape(residual,jnp.asarray(x0),seed).shape[0]
         task = ResidualTask(model, residual, rows, gain=fps)
         bounds = FrameBounds(model, robot.lower[3:] + 1e-7, robot.upper[3:] - 1e-7, robot.joint_step(fps, cfg), fps)
-        solver = DiffIKSolver(model, [task], [bounds], regularization=1., solver_tol=1e-7)
+        constraints=[bounds]
+        if t.get('foot_self_collision',False):
+            from .frax_foot_constraints import FootGeometry,FootSupport
+            feet=FootGeometry(model,robot,fps);constraints.extend([feet,FootSupport(model,robot,fps)])
+            self.report['initial_foot_geometry']=feet.report
+        solver = DiffIKSolver(model, [task], constraints, regularization=1., solver_tol=1e-7)
         dt = .5 / fps
 
         def iterate(state, ref, count):
             # Half Newton steps reduce overshoot at changing mesh minima.
             def body(_, carry):
                 state, iters, failed = carry
+                if 'priority_pose' in ref:state=state._replace(q=jnp.where(ref['priority_mask'],ref['priority_pose'],state.q))
                 state, _, info = solver.step(state, ref, dt)
+                if 'priority_pose' in ref:state=state._replace(q=jnp.where(ref['priority_mask'],ref['priority_pose'],state.q))
                 return state, iters + info.qp_iters, failed + jnp.logical_not(info.qp_converged).astype(jnp.int32)
             return jax.lax.fori_loop(0, count, body, (state, jnp.int32(0), jnp.int32(0)))
 
@@ -272,8 +294,9 @@ class FraxIK:
             initial_q=carry[0].q
             ref0 = {**first, "first": 1., "previous": initial_q, "predicted": initial_q, "root_velocity_goal": initial_q[:3]}
             # Three independent first-frame branches; no CPU IK fallback.
-            seeds = jnp.tile(initial_q, (3, 1))
-            for k, yaw in enumerate((-1.2, 1.2), 1):
+            branches=initial_branch_count(t)
+            seeds = jnp.tile(initial_q, (branches, 1))
+            for k, yaw in enumerate((-1.2, 1.2) if branches==3 else (), 1):
                 for g in robot.sides.values():
                     seeds = seeds.at[k,g['arm'][2]].set(yaw).at[k,g['arm'][4]].set(-yaw)
             states, iterations, failures = jax.vmap(lambda q: iterate(solver.init(q), ref0, self.initial_iterations))(jnp.asarray(seeds))

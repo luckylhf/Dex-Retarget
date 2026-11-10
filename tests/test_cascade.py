@@ -11,7 +11,7 @@ def arguments(tmp_path,names=('easy','retry_ok','v8_ok','bad_input','unresolved'
     source=tmp_path/'input.bvh';source.write_text('fixture')
     manifest=tmp_path/'manifest.json';manifest.write_text(json.dumps({'cases':[
         dict(id=name,input=source.name,input_sha256=sha(source),source='lafan') for name in names]}))
-    return argparse.Namespace(manifest=manifest,output=tmp_path/'out',budget=30.,
+    return argparse.Namespace(pipeline='two-stage',manifest=manifest,output=tmp_path/'out',budget=30.,
         frax_timeout=2.,v8_timeout=4.,iterations=8,initial_iterations=100)
 
 

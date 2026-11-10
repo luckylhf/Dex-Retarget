@@ -9,5 +9,9 @@
   "torso_up_max_deg": 45.0,
   "torso_orientation_p95_deg": 35.0,
   "arm_direction_p95_deg": 20.0,
-  "hand_axis_p95_deg": 25.0
+  "hand_axis_p95_deg": 25.0,
+  "leg_direction_p95_deg": null,
+  "forearm_width_p95_deg": null,
+  "root_xy_max_m": null,
+  "root_z_max_m": null
 }

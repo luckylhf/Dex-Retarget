@@ -17,6 +17,7 @@ from .resource_policy import ResourcePolicy
 from .dispatch import duration_seconds,route,priority,deduplicate
 from .memory_learning import MemoryLearning
 from .contract import conversion_contract
+from .dispatch import pipeline_stages,use_unified
 
 def child(connection,options):
     for key in ('OMP_NUM_THREADS','OPENBLAS_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS','VECLIB_MAXIMUM_THREADS'):
@@ -65,6 +66,7 @@ class Slot(Worker):
 
 def timeout_for(args,mode,frames):
     explicit=getattr(args,mode+'_timeout',None)
+    if explicit is None and getattr(args,'profile',None)=='refine':return args.budget
     return explicit if explicit is not None else (max(900.,300.+.5*frames) if mode=='frax' else max(1800.,600.+1.5*frames))
 
 def finish(record,response,mode,folder,out,allow_collision_v8=False):
@@ -212,7 +214,7 @@ def _run(args,slot_factory,monitor):
         compile_extra_gib=max(0,args.worker_peak_gib-getattr(args,'worker_resident_gib',args.worker_peak_gib)),
         peak_bytes_per_output_frame=admission.value['stages']['frax']['bytes_per_output_frame'],start_method='spawn',cgroup_limit_bytes=snap['cgroup_limit'],
         frax_peak_bytes_per_output_frame=admission.value['stages']['frax']['bytes_per_output_frame'],
-        scheduling='frax_all_then_independent_v8_v6',stage_barriers=args.mode=='auto',long_seconds=None,
+        scheduling='frax_checked_local_repairs_v1' if use_unified(args) else 'frax_all_then_independent_v8_v6',stage_barriers=args.mode=='auto' and not use_unified(args),long_seconds=None,
         identity='frozen before workers, recomputed after workers',model='verified MJB, reused per spawn worker; no cross-process fork sharing')
     pool_stats=Counter()
     stop_path=out/'STOP'
@@ -265,7 +267,7 @@ def _run(args,slot_factory,monitor):
                 if r['status']=='accepted':accepted.append(dict(case=r['case'],input=c['input'],input_sha256=c['input_sha256'],mode=r['selected_mode'],output=r['selected_output'],training_npz=r['training_npz'],training_sha256=r['training_sha256'],fingerprint=r['fingerprint']))
             atomic_json(out/'accepted.json',dict(schema=1,path_base='batch output directory',motions=accepted))
             atomic_json(out/'batch.json',dict(live,
-                stage_order=list(STAGES) if args.mode=='auto' else [args.mode],
+                stage_order=list(pipeline_stages(args)) if args.mode=='auto' else [args.mode],pipeline=getattr(args,'pipeline','unified'),
                 unique_sources=len(cases),duplicate_aliases=len(aliases),
                 acceptance_policy='common_pose_geometry_v1',manifest_sha256=sha_bytes(content),budget_s=args.budget,
                 records=records,resumed=resume,previous_elapsed_s=previous.get('elapsed_s') if previous else None))
@@ -284,7 +286,7 @@ def _run(args,slot_factory,monitor):
         for i,c in enumerate(cases):
             try:
                 frames[i]=res.output_frames(c['input']);durations[i]=duration_seconds(c['input'])
-                routes[i]=route(args.mode,durations[i],getattr(args,'single_pipeline',False))
+                routes[i]=route(args.mode,durations[i],getattr(args,'single_pipeline',False),getattr(args,'pipeline','unified'))
                 records[i].update(duration_s=float(durations[i]),route=list(routes[i]))
             except (OSError,ValueError) as error:records[i].update(status='input_error',error=str(error))
         if resume:atomic_json(out/('resume_identity.'+str(time.time_ns())+'.json'),snapshot)
@@ -399,7 +401,7 @@ def _run(args,slot_factory,monitor):
                     old_log=folder.parent/(mode+'.log') if args.mode=='auto' else out/(c['id']+'.log')
                     if old_log.exists():old_log.rename(old_log.with_name(old_log.name+'.interrupted.'+str(time.time_ns())))
                 reuse=None
-                arguments=dict(input=c['input'],output=str(folder),source=c['source'],mode=mode,iterations=args.iterations,initial_iterations=args.initial_iterations,max_frames=None,legacy_frax=False,reuse_initial_from=reuse,require_initial_reuse=reuse is not None)
+                arguments=dict(bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'),input=c['input'],output=str(folder),source=c['source'],mode=mode,iterations=args.iterations,initial_iterations=args.initial_iterations,max_frames=None,legacy_frax=False,reuse_initial_from=reuse,require_initial_reuse=reuse is not None,pipeline=getattr(args,'pipeline','unified'),unified_repair=use_unified(args),repair_similarity=getattr(args,'repair_similarity','soft'),profile=getattr(args,'profile',None),repair_budget=getattr(args,'repair_budget',None),allow_local_slowdown=getattr(args,'allow_local_slowdown',False),resume_recheck=getattr(args,'resume_recheck',False))
                 job=dict(input=c['input'],input_sha256=c['input_sha256'],log=str(folder.parent/(mode+'.log') if args.mode=='auto' else out/(c['id']+'.log')),arguments=arguments)
                 active[idle]=dict(index=i,mode=mode,folder=folder,peak=peak,reuse=reuse is not None)
                 pool_stats['resident_reuses' if idle.pid else 'process_starts']+=1

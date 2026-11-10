@@ -10,7 +10,7 @@ import sys
 import time
 from .cli import atomic_json, sha
 
-from .dispatch import STAGES
+from .dispatch import STAGES,pipeline_stages,use_unified
 
 
 def load_manifest(path, contents=None):
@@ -127,7 +127,8 @@ def run(args,worker_factory=Worker):
     started=time.perf_counter();records=[dict(case=c['id'],status='pending',attempts=[],
         selected_mode=None,selected_output=None,training_npz=None) for c in cases]
     worker=worker_factory();state='running';active=None
-    timeouts={mode:getattr(args,mode+'_timeout') for mode in STAGES}
+    stages=pipeline_stages(args)
+    timeouts={mode:getattr(args,mode+'_timeout') for mode in stages}
 
     def save():
         accepted=[]
@@ -137,14 +138,14 @@ def run(args,worker_factory=Worker):
                     mode=record['selected_mode'],output=record['selected_output'],training_npz=record['training_npz'],
                     training_sha256=record['training_sha256'],fingerprint=record['fingerprint']))
         atomic_json(out/'accepted.json',dict(schema=1,path_base='batch output directory',motions=accepted))
-        atomic_json(out/'batch.json',dict(schema=1,mode='auto',status=state,stage_order=STAGES,
+        atomic_json(out/'batch.json',dict(schema=1,mode='auto',status=state,stage_order=stages,pipeline=getattr(args,'pipeline','unified'),
             acceptance_policy='common_pose_geometry_v1',manifest_sha256=manifest_sha256,
             budget_s=args.budget,stage_timeout_s=timeouts,elapsed_s=time.perf_counter()-started,
             accepted=len(accepted),records=records))
 
     save()
     try:
-        for mode in STAGES:
+        for mode in stages:
             for source,record in zip(cases,records):
                 if record['status'] in ('accepted','input_error'):continue
                 remaining=args.budget-(time.perf_counter()-started)
@@ -152,9 +153,10 @@ def run(args,worker_factory=Worker):
                     state='budget_exhausted';break
                 case_dir=out if getattr(args,'single_pipeline',False) else out/source['id'];case_dir.mkdir(exist_ok=True)
                 folder=case_dir/mode
-                arguments=dict(input=source['input'],output=str(folder),source=source['source'],mode=mode,
+                arguments=dict(bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'),input=source['input'],output=str(folder),source=source['source'],mode=mode,
                     iterations=args.iterations,initial_iterations=args.initial_iterations,max_frames=getattr(args,'max_frames',None),
-                    legacy_frax=False,reuse_initial_from=None,require_initial_reuse=False)
+                    legacy_frax=False,reuse_initial_from=None,require_initial_reuse=False,
+                    pipeline=getattr(args,'pipeline','unified'),unified_repair=use_unified(args),repair_similarity=getattr(args,'repair_similarity','soft'),profile=getattr(args,'profile',None),repair_budget=getattr(args,'repair_budget',None),allow_local_slowdown=getattr(args,'allow_local_slowdown',False),resume_recheck=getattr(args,'resume_recheck',False),continue_from=getattr(args,'continue_from',None))
                 job=dict(input=source['input'],input_sha256=source['input_sha256'],log=str(case_dir/(mode+'.log')),arguments=arguments)
                 active=(record,folder,mode)
                 response=worker.run(job,min(timeouts[mode],remaining))

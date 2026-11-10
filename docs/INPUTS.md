@@ -21,6 +21,16 @@ export DEX_FRAX_ASSETS=/absolute/path/to/assets/dex_evt
 | `mocap` | 已逐关节验证的 Y-up 骨架，含手指基点及脚趾标记；附带 nobody 示例使用此项 | 无 |
 | `auto` | 按关节名选择上述来源 | 取决于识别的来源 |
 
+BVH 默认使用厘米及 `absolute` 位置通道，文件本身通常不声明这些语义，不自动猜测。可显式指定：
+
+```sh
+.venv/bin/dex-frax convert input.bvh outputs/motion --source mocap --bvh-units m --bvh-translations offset
+```
+
+`--bvh-units` 支持 `cm`、`m`、`mm`；`absolute` 表示位置通道直接替代对应 OFFSET 分量，`offset` 表示通道值加 OFFSET。相同选项也适用于 `batch`，一个批次使用同一约定，不同约定应分批。参数写入转换身份与产物元数据，改变后不能沿用旧续跑身份。SMPL-X 仍使用自己的 `--units m`。
+
+mocap 的前臂横向参考使用零旋转骨架中完整父链累积后的指根位置差，再用于前臂局部参考；不再直接相减不同父系的末级 OFFSET，也不依赖截取片段的第一帧。
+
 推荐显式指定来源。`mocap` 不表示支持任意 BVH；新的关节命名、局部轴或骨架拓扑需要先适配。
 
 LAFAN/SOMA 的参考几何表不随 Git 或 wheel 分发。合法取得后放入
@@ -130,7 +140,7 @@ body_models/
 
 `examples/inputs/smplx/gbtc/gbtc.pt` 是附带的一组 30 fps GVHMR 缓存，可直接替换上面示例中的 `.pt` 路径，运行方式见 [README](../README.md)。
 
-`check-input` 只检查内容结构；实际模型文件、人体几何和支撑证据充分性在 `convert` 时检查。`--max-frames` 仅用于短输入接口测试，不能作为全片质量验收。SMPL-X 单文件默认同样按 `frax → v8`：先完整 Frax，未通过再从人体输入独立完整 V8，通过即停止。仅复用人体几何准备，不复用机器人初解；可用 `--mode frax` 或 `--mode v8` 固定模式，`hybrid` 已移除。`--budget` 限制自动流程（包含人体准备），固定模式不使用该总预算。
+`check-input` 只检查内容结构；实际模型文件、人体几何和支撑证据充分性在 `convert` 时检查。`--max-frames` 仅用于短输入接口测试，不能作为全片质量验收。SMPL-X 同样提供 `--mode fast`（默认，完整 Frax 求解、导出和检查）与 `--mode refine`（追加问题窗口精修）；复用整片人体几何与标定，不自动重跑完整 V8。旧模式入口已移除。两种模式的 `--budget` 都限制总时间（包含人体准备）。精修另支持 `--repair-budget` 和 `--continue-from`，后者仍须提供相同输入和源参数。
 
 人体准备在 `--smplx-python` 的独立子进程中执行，不要求旧 GMR 环境安装 JAX。准备后的 `input/human.npz` 是内部几何缓存，不是可重新当作 SMPL-X 参数提交的公共输入格式。
 
@@ -153,7 +163,7 @@ BVH 示例的文件来源和 SHA-256 见目录内 `manifest.json`；GBTC 的逐�
 
 ## 输出格式
 
-每个完成的求解阶段保存以下文件；自动模式按需生成 `frax/`、`v8/` 子目录，固定模式直接写入指定目录。
+每个完成的求解阶段保存以下文件；默认统一模式生成 `frax/`；两阶段对照按需生成 `frax/`、`v8/` 子目录，固定模式直接写入指定目录。
 
 | 文件 | 内容 |
 |---|---|

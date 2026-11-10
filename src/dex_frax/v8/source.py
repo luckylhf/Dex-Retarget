@@ -8,6 +8,22 @@ from .math3d import unit, frame_yz, frame_xz
 
 REFERENCE=Path(__file__).resolve().parent/'reference'
 
+def rest_forearm_width(motion,side):
+    """Finger-base separation in the zero-rotation BVH forearm frame.
+
+    OFFSET is in each joint's parent frame. Intermediate metacarpal offsets
+    must be accumulated before subtracting endpoints. BVH zero rotations
+    share the same axes; no animated wrist rotation enters this calibration.
+    """
+    positions=np.asarray(motion.offsets,float).copy()
+    for j,parent in enumerate(motion.parents):
+        if parent>=0:positions[j]+=positions[parent]
+    index=motion.names.index(side+'HandIndex1');pinky=motion.names.index(side+'HandPinky1')
+    width=positions[index]-positions[pinky]
+    if np.linalg.norm(width)<1e-10:raise ValueError('Degenerate rest finger width: '+side)
+    return width
+
+
 def adapt(motion, source='auto'):
     p,r=motion.fk();n=len(p['Hips']);fps=motion.fps
     if source=='auto':
@@ -53,7 +69,7 @@ def adapt(motion, source='auto'):
                 if np.linalg.norm(offsets[toe])<.03:raise ValueError('Unusable mocap Foot End Site')
                 forward=np.array([0.,0.,1.]);up=np.array([0.,1.,0.])
                 foot_frame=frame_xz(r[ankle]@forward,r[ankle]@up)
-                forearm_local=offsets[s+'HandIndex1']-offsets[s+'HandPinky1']
+                forearm_local=rest_forearm_width(motion,s)
                 foot_cal='mocap Y-up foot frame; parsed End Site toe; inferred heel'
             else:
                 foot_frame,heel,toe_p,foot_cal,scene=lafan_foot(motion,p,r,s)

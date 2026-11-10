@@ -66,7 +66,8 @@ so function-value stopping tests retain the original meaning.
         def direction(a,b,target,weight):
             p,P=point(a);q,Q=point(b);d=q-p;length=np.linalg.norm(d);u=d/length
             add(u-target,(np.eye(3)-np.outer(u,u))@(Q-P)/length,weight)
-        add(y[:3]-t['root_p'][i],eye_[:3],w['root_position'])
+        rootJ=np.eye(32)[:3,ids]
+        add(x[:3]-t['root_p'][i],rootJ,w['root_position'])
         for side,v in t['sides'].items():
             g=r.sides[side];b=g['foot']
             direction(g['hip'],g['knee'],v['thigh'][i],w['leg_direction'])
@@ -96,8 +97,8 @@ so function-value stopping tests retain the original meaning.
             add(y-self.prev[ids],eye_,w['joint_velocity']*f)
             add(y-self.pred[ids],eye_,w['joint_acceleration']*f*f)
             goal=self.prev[:3]+t['root_p'][i]-t['root_p'][i-1]
-            add(y[:3]-goal,eye_[:3],w['root_velocity']*f)
-            add(y[:3]-self.pred[:3],eye_[:3],w['root_acceleration']*f*f)
+            add(x[:3]-goal,rootJ,w['root_velocity']*f)
+            add(x[:3]-self.pred[:3],rootJ,w['root_acceleration']*f*f)
         self.cached=y.copy();self.result=np.concatenate(res),np.vstack(js);self.calls+=1
         return self.result
 
@@ -144,8 +145,8 @@ def geometric_seed(robot,t,i,base,ids,lo,hi):
 
 def constrain_support(robot,t,xs,cfg,progress=None):
     """Checked bypass -> bounded differential IK -> original SQP fallback."""
-    ids=np.array([0,1,2]+sum([g['leg'] for g in robot.sides.values()],[]));out=xs.copy();reports=[]
-    leg_indices=ids[3:]-3;step=robot.joint_step(t['fps'],cfg)[leg_indices]
+    ids=np.array(([2] if cfg.get('_pelvis_height_only') else [0,1,2])+sum([g['leg'] for g in robot.sides.values()],[]));out=xs.copy();reports=[]
+    joint=ids>=3;leg_indices=ids[joint]-3;step=robot.joint_step(t['fps'],cfg)[leg_indices]
     robot.support_branch_relaxations=[]
     prev=None;pred=None
     counts=dict(bypass=0,light=0,fallback=0,geometry_seeds=0,qp_steps=0,objective_evaluations=0,frames=[])
@@ -153,10 +154,16 @@ def constrain_support(robot,t,xs,cfg,progress=None):
                   fallback_successes=0,fallback_failures=0,
                   route_seconds={k:0. for k in ('bypass','light','fallback')},
                   qp_setup_s=0.,qp_solve_s=0.,fallback_s=0.)
+    saved=cfg.get('_support_progress')
+    if saved and 'out' in saved:
+        out=np.asarray(saved['out']);prev=None if saved['prev'] is None else np.asarray(saved['prev']);pred=None if saved['pred'] is None else np.asarray(saved['pred']);reports=list(saved['reports'])
     started=time.perf_counter()
     for i,base in enumerate(xs):
+        if saved is not None and i<saved.get('next',0):continue
+        if cfg.get('_repair_deadline') is not None and time.monotonic()>=cfg['_repair_deadline']:raise TimeoutError('support_window_deadline')
         frame_started=time.perf_counter();obj=None
         def state(y):
+            if cfg.get('_repair_deadline') is not None and time.monotonic()>=cfg['_repair_deadline']:raise TimeoutError('support_window_deadline')
             x=base.copy();x[ids]=y;robot.set(x,t['root_r'][i]);return x
         state(base[ids]);active={s:set(np.argsort(g['hull']@robot.rot(g['foot'])[2])[:8].tolist()) for s,g in robot.sides.items()}
         geometry_cache={}
@@ -186,12 +193,12 @@ def constrain_support(robot,t,xs,cfg,progress=None):
             geometry_cache[key]=(y.copy(),result);return result
         has_contact=any(v['contact'][i]>0 for v in t['sides'].values())
         lo=robot.lower[ids].copy();hi=robot.upper[ids].copy()
-        lo[3:]=np.maximum(lo[3:],base[ids][3:]-.30);hi[3:]=np.minimum(hi[3:],base[ids][3:]+.30)
+        lo[joint]=np.maximum(lo[joint],base[ids][joint]-.30);hi[joint]=np.minimum(hi[joint],base[ids][joint]+.30)
         if prev is not None:
-            vlo=np.maximum(robot.lower[ids[3:]],prev[ids[3:]]-step);vhi=np.minimum(robot.upper[ids[3:]],prev[ids[3:]]+step)
-            slo=np.maximum(lo[3:],vlo);shi=np.minimum(hi[3:],vhi);valid=shi>slo+1e-6
+            vlo=np.maximum(robot.lower[ids[joint]],prev[ids[joint]]-step);vhi=np.minimum(robot.upper[ids[joint]],prev[ids[joint]]+step)
+            slo=np.maximum(lo[joint],vlo);shi=np.minimum(hi[joint],vhi);valid=shi>slo+1e-6
             if not valid.all():robot.support_branch_relaxations.append(dict(frame=i,joints=[robot.names[k] for k in leg_indices[~valid]]))
-            lo[3:]=np.where(valid,slo,vlo);hi[3:]=np.where(valid,shi,vhi)
+            lo[joint]=np.where(valid,slo,vlo);hi[joint]=np.where(valid,shi,vhi)
         def checks(y):
             floor=float(geometry(y,all_vertices=True,jacobian=False)[0].min());eq=float(np.max(abs(geometry(y,True,jacobian=False)[0]))) if has_contact else 0.
             valid=np.isfinite(y).all() and np.all(y>=lo-1e-9) and np.all(y<=hi+1e-9) and floor>=-1e-5 and eq<=1e-4
@@ -213,7 +220,7 @@ def constrain_support(robot,t,xs,cfg,progress=None):
                 # otherwise the minimum vertex can switch after each update.
                 res,J=obj.evaluate(y);eq,E=geometry(y,True);z,G=geometry(y,all_vertices=True)
                 H=J.T@J+np.eye(len(ids))*.01;gradient=J.T@res
-                trust=np.r_[np.full(3,.05),np.full(len(ids)-3,.15)]
+                trust=np.where(ids<3,.05,.15)
                 blocks=[eye(len(ids),format='csc')];lower=[np.maximum(lo-y,-trust)];upper=[np.minimum(hi-y,trust)]
                 if len(eq):blocks.append(csc_matrix(E));lower.append(-eq);upper.append(-eq)
                 if len(z):blocks.append(csc_matrix(G));lower.append(-z);upper.append(np.full(len(z),np.inf))
@@ -278,6 +285,7 @@ def constrain_support(robot,t,xs,cfg,progress=None):
                                     fallback_triggers=fallback_triggers,pre_fallback_minimum_z=pre_fallback_floor,
                                     pre_fallback_contact_error_m=pre_fallback_eq,final_feasible=ok,
                                     elapsed_s=elapsed,fallback_s=fallback_seconds))
+        if saved is not None:saved.update(next=i+1,out=out.tolist(),prev=prev.tolist(),pred=pred.tolist(),reports=reports)
         if progress and ((i+1)%120==0 or i==len(xs)-1):progress(i+1,len(xs))
     counts['elapsed_s']=time.perf_counter()-started;robot.support_fast_report=counts
     return out,reports

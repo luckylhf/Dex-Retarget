@@ -47,16 +47,16 @@ PY
 .venv/bin/dex-frax batch manifest.json outputs/batch --budget 604800
 ```
 
-输出目录必须是新目录。默认 `--mode auto --workers auto`：所有动作（包括不少于 60 秒的长动作）先跑完整 Frax；整批 Frax 结束后，仅未通过项从人体输入独立跑完整 V8，包含重新初解和全部 V8 后处理，不复用 Frax 轨迹。Frax 短动作优先，V8 长动作优先；时长按 BVH 的 `Frames × Frame Time` 计算。内存不够派发高优先级动作时等待资源；阶段切换前等待剩余 Frax 完成，此时可能暂时不能占满 CPU。
+输出目录必须是新目录。默认 `--mode fast --workers auto`：所有时长动作均完整 Frax 求解、导出和检查，不追加精修。`--mode refine` 才运行持续问题窗口修复。按 BVH 的 `Frames × Frame Time` 从短到长排序，内存不足时等待资源。两种模式均没有独立完整 V8 后续队列。
 
 默认保留 80 GiB 磁盘空间。小批次试跑时，若空余空间不足，可显式加 `--disk-reserve-gib 5`；大批次应按预计输出大小留足空间。磁盘空余低于预留量时，dynamic 和 manual 都会终止本批次工作进程并以 `resource_exhausted` 退出；释放空间后，使用同一清单、原输出目录及资源参数加 `--resume` 手动续跑。
 
-`--mode frax` 或 `--mode v8` 可将整批固定为一种完整模式；`hybrid` 已移除。通过即停止升级；输入错误停止该动作，其他未通过项保留各阶段结果。V8 后仍未通过的动作保留待审，安全与质量门槛不变。
+输入错误停止该动作，完整未通过项保留 `review` 和可播放结果。`refine` 只保留通过候选保护的改进，最终仍使用同一验收门槛。
 
-总预算默认 **1800 秒**，`--budget` 和 `--frax-timeout / --v8-timeout` 均为秒。
+总预算默认 **1800 秒**，`--budget` 和 `--frax-timeout` 均为秒。`refine` 未显式设定单条超时时，以批次剩余总预算为上限，不再套用短 Frax 的估算超时。可用 `--repair-budget` 单独限制每条的精修部分；这会保存待处理窗口并正常导出待审动作。
 
-- **总预算耗尽：**终止整个批次的在途工作进程，以 `budget_exhausted` 结束批次。
-- **单条阶段超时：**仅终止对应工作进程并记录 `timeout`；其他动作在剩余总预算内继续处理，自动模式可按分级规则尝试该动作的下一阶段。
+- **总预算耗尽：**终止整个批次的在途工作进程，以 `budget_exhausted` 结束。
+- **单条超时：**仅终止对应工作进程；其他动作在剩余预算内继续，不升级到独立 V8。
 
 未完成的结果不会进入验收清单。
 
@@ -73,7 +73,7 @@ rm -f outputs/batch/STOP
 .venv/bin/dex-frax batch manifest.json outputs/batch --budget 604800 --resume
 ```
 
-续跑校验清单、输入、实现、资产、依赖、转换参数和已完成产物哈希；保留完成阶段，将未完成阶段归档后重试。资产身份包括目录内的 README 等全部文件，运行中及续跑前均应保持原字节。修改求解、审核或导出实现后应使用新目录。不要在运行中覆盖代码或资产文件。此次两阶段流程变更需要新输出目录，不能用调度兼容开关续跑旧三阶段批次；旧产物保留原身份。
+续跑校验清单、输入、实现、资产、依赖、转换参数和已完成产物哈希；保留完成阶段，将未完成阶段归档后重试。资产身份包括目录内的 README 等全部文件，运行中及续跑前均应保持原字节。修改求解、审核或导出实现后应使用新目录。不要在运行中覆盖代码或资产文件。此次模式与验收变更需要新输出目录；不能绕过身份检查续跑旧版本批次。旧产物保留原身份。
 
 仅更改 `managed_batch.py` / `resources.py` 的维护场景可显式设置 `DEX_FRAX_ALLOW_SCHEDULER_RESUME=1`，允许调度兼容续跑。其他身份仍严格核验，差异写入 `scheduler_resume.*.json`，原产物身份保留。
 
@@ -87,7 +87,7 @@ rm -f outputs/batch/STOP
 
 默认状态目录为 `~/.cache/dex-frax`，可用 `DEX_FRAX_STATE_DIR` 指定。批次锁防止同一状态目录重复占用资源；共享 JAX 缓存应仅允许本用户写入。完整参数见 `dex-frax batch --help`。
 
-启动时生成 `resource_policy.json`，也可用 `--resource-policy` 指定已有文件。每 2 秒检查修改，可调整 `workers`、`memory_learning`、`compile_extra_gib` 和 `stages.frax`、`stages.v8` 的内存估算；`workers` 不得超过启动上限。建议在生成的完整文件上修改并原子替换，非法配置保留最近有效值。热加载不改变求解参数、质量门槛或 cgroup 硬限制。
+启动时生成 `resource_policy.json`，也可用 `--resource-policy` 指定已有文件。每 2 秒检查修改，可调整 `workers`、`memory_learning`、`compile_extra_gib` 和 `stages.frax` 的内存估算（旧资源文件中的 `stages.v8` 不再对应执行阶段）；`workers` 不得超过启动上限。建议在生成的完整文件上修改并原子替换，非法配置保留最近有效值。热加载不改变求解参数、质量门槛或 cgroup 硬限制。
 
 ## 状态和结果
 
@@ -97,8 +97,12 @@ rm -f outputs/batch/STOP
 | `batch.json` | 每 30 秒及停止时保存的完整检查点、尝试与耗时 |
 | `accepted.json` | 通过的训练文件、相对路径及 SHA-256 |
 | `<id>/selection.json` | 该动作的最终状态、选中模式及路径 |
-| `<id>/<mode>/` 和 `<id>/<mode>.log` | 自动模式各阶段产物和日志；固定模式产物直接在 `<id>/` |
+| `<id>/frax/` 和 `<id>/frax.log` | 两种模式的动作、报告和日志；`profile` 区分快速/精修 |
 
 下游读取 `accepted.json` 的 `motions`，路径相对于批次输出目录。`complete` 表示调度完成，逐动作还需区分 `accepted`、`review`、`failed`、`input_error`、`budget_exhausted`、`interrupted`、`resource_exhausted` 和 `identity_changed`。资源或执行失败不能当作动作质量结论。
 
 强杀或断电可能丢失最后 30 秒检查点。使用 STOP 或 SIGTERM 并等待退出，可保留可续跑状态。
+
+精修记录在每条动作的 `frax/repair.json`，固定初解在 `frax/frax_baseline/`，队列检查点在 `frax/refine_state.json`。通过项不追加修复。局部检查缓存只存在于进程内，继续时先重新检查当前轨迹。
+
+批次 `--resume` 保留完成结果，未完成尝试按原调度规则归档并重试；不会自动把已完成但待审的条目再精修。对这类动作，使用单文件 `convert --mode refine --continue-from <id>/frax` 写到新目录，继续未完成候选。详见 [精修流程](PIPELINE.md)。

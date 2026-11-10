@@ -109,3 +109,41 @@ def test_qp_failure_is_diagnosed_separately_from_successful_fallback(sample,monk
     assert r.support_fast_report['fallback_successes']==2
     assert all(f['light_stop_reason']=='qp_maximum_iterations_reached' and f['final_feasible']
                for f in r.support_fast_report['frames'])
+
+
+def test_height_only_support_keeps_horizontal_path_and_upper_pose(sample):
+    r,t,x,cfg=sample
+    actual,reports=constrain_support(r,t,x[:5],dict(cfg,_pelvis_height_only=True))
+    ids=np.array([2]+sum([g['leg'] for g in r.sides.values()],[]))
+    fixed=np.setdiff1d(np.arange(32),ids)
+    np.testing.assert_array_equal(actual[:,fixed],x[:5,fixed])
+    assert np.max(abs(actual[:,2]-x[:5,2]))>1e-5
+    assert not reports
+    assert all(f['minimum_z']>=-1e-5 and f['contact_error_m']<=1e-4 for f in r.support_fast_report['frames'])
+
+
+def test_height_only_cost_and_gradient_match_full_objective(sample):
+    r,t,x,cfg=sample;ids=np.array([2]+sum([g['leg'] for g in r.sides.values()],[]));i=4
+    full=Objective(r,t,i,cfg,x[i-1],x[i-2]);small=SupportObjective(r,t,i,cfg,x[i],ids,x[i-1],x[i-2])
+    rng=np.random.default_rng(6)
+    for _ in range(6):
+        at=x[i].copy();at[ids]+=rng.normal(0,.01,len(ids));res,J=full.evaluate(at);cost,grad=small.fun(at[ids])
+        np.testing.assert_allclose(cost,.5*(res@res),atol=1e-8,rtol=1e-10)
+        np.testing.assert_allclose(grad,J[:,ids].T@res,atol=1e-8,rtol=1e-10)
+
+
+def test_frax_support_rows_measure_true_sole_and_allow_only_height(sample):
+    import jax.numpy as jnp
+    from dex_frax.kinematics import DexKinematics
+    from dex_frax.frax_foot_constraints import FootSupport
+    r,t,x,cfg=sample;model=DexKinematics(r);constraint=FootSupport(model,r,50.)
+    ids=np.array([2]+sum([g['leg'] for g in r.sides.values()],[]));mask=np.ones(32,bool);mask[ids]=False
+    ref=dict(root_r=jnp.asarray(t['root_r'][0]),priority_mask=jnp.asarray(mask),priority_pose=jnp.asarray(x[0]),
+        sides={s:{k:jnp.asarray(v[k][0]) for k in ('contact','pivots','anchors')} for s,v in t['sides'].items()})
+    G,h=constraint.rows(jnp.asarray(x[0]),ref);G=np.asarray(G);h=np.asarray(h)
+    np.testing.assert_array_equal(G[:,mask],0.)
+    r.set(x[0],t['root_r'][0]);height=np.array([r.point(g['foot'],r.lowest(s))[2] for s,g in r.sides.items()])
+    np.testing.assert_allclose(h[:2],50*(height-.0001),atol=1e-10)
+    shifted=x[0].copy();shifted[2]+=.01
+    _,h2=constraint.rows(jnp.asarray(shifted),ref)
+    np.testing.assert_allclose(np.asarray(h2)[:2]-h[:2],.5,atol=1e-10)
