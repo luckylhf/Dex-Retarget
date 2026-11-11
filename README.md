@@ -63,6 +63,10 @@ BVH 来源使用 `lafan`、`soma` 或 `mocap`；`mocap` 需要已适配的骨架
 
 `v1` / `v2` 对应 `--foot-contact v1` / `v2`（默认 v2，见下文）。两版 NPZ 均为 50 Hz，与转换生成的 `motion.npz` 同格式：`root_pos`、`root_rot`（XYZW）、`dof_pos`、`joint_names`、`quat_order`、`model_sha256`、`robot`。逐帧 CSV 对比两版的关节最大差异和根平移差异，以及左右脚的支撑相位、目标与实际 roll、sole 三轴角、鞋底与外缘最低点。
 
+![人体输入与 v1 / v2 参考动作同屏回放](docs/pt-v1-v2.gif)
+
+同一段人体动作与两版 50 Hz 参考动作在一个查看器里同步回放：左为人体骨架，中为 `v1`，右为 `v2`。回放是运动学示意，不含动力学。
+
 `preview` 只接受转换结果中的 `motion.pkl`，不能直接播放这些参考 NPZ；它们用于数值对照，不代表当前 `accepted` 结论。
 
 SMPL-X 输入先按 [输入规范](docs/INPUTS.md#smpl-x) 配置 `SMPLX_PYTHON` 和 `SMPLX_MODEL_DIR`，再运行：
