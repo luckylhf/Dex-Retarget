@@ -7,6 +7,8 @@ import subprocess
 import sys
 import time
 
+from .contract import DEFAULT_FOOT_CONTACT
+
 
 def add_options(parser):
     parser.add_argument('--body-models',type=Path,default=os.environ.get('SMPLX_MODEL_DIR'))
@@ -44,6 +46,8 @@ def prepare(args, directory, timeout=None):
     dest = Path(directory)/'input'/'human.npz'
     cmd = [str(args.smplx_python),'-m','dex_frax.smplx_input',str(args.input),
            '--output',str(dest),'--body-models',str(args.body_models),'--grounding',args.grounding]
+    if getattr(args, 'foot_contact', DEFAULT_FOOT_CONTACT) == 'v2':
+        cmd.append('--sole-corners')
     for attr in ('input_fps','up_axis','units','max_frames'):
         value=getattr(args,attr,None)
         if value is not None: cmd.extend(['--'+attr.replace('_','-'),str(value)])

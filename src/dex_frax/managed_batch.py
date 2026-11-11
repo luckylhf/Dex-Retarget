@@ -16,7 +16,7 @@ from .cli import atomic_json,sha,static_identity
 from .resource_policy import ResourcePolicy
 from .dispatch import duration_seconds,route,priority,deduplicate
 from .memory_learning import MemoryLearning
-from .contract import conversion_contract
+from .contract import DEFAULT_FOOT_CONTACT, conversion_contract
 from .dispatch import pipeline_stages,use_unified
 
 def child(connection,options):
@@ -401,7 +401,7 @@ def _run(args,slot_factory,monitor):
                     old_log=folder.parent/(mode+'.log') if args.mode=='auto' else out/(c['id']+'.log')
                     if old_log.exists():old_log.rename(old_log.with_name(old_log.name+'.interrupted.'+str(time.time_ns())))
                 reuse=None
-                arguments=dict(bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'),input=c['input'],output=str(folder),source=c['source'],mode=mode,iterations=args.iterations,initial_iterations=args.initial_iterations,max_frames=None,legacy_frax=False,reuse_initial_from=reuse,require_initial_reuse=reuse is not None,pipeline=getattr(args,'pipeline','unified'),unified_repair=use_unified(args),repair_similarity=getattr(args,'repair_similarity','soft'),profile=getattr(args,'profile',None),repair_budget=getattr(args,'repair_budget',None),allow_local_slowdown=getattr(args,'allow_local_slowdown',False),resume_recheck=getattr(args,'resume_recheck',False))
+                arguments=dict(bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'),foot_contact=getattr(args,'foot_contact',DEFAULT_FOOT_CONTACT),input=c['input'],output=str(folder),source=c['source'],mode=mode,iterations=args.iterations,initial_iterations=args.initial_iterations,max_frames=None,legacy_frax=False,reuse_initial_from=reuse,require_initial_reuse=reuse is not None,pipeline=getattr(args,'pipeline','unified'),unified_repair=use_unified(args),repair_similarity=getattr(args,'repair_similarity','soft'),profile=getattr(args,'profile',None),repair_budget=getattr(args,'repair_budget',None),allow_local_slowdown=getattr(args,'allow_local_slowdown',False),resume_recheck=getattr(args,'resume_recheck',False))
                 job=dict(input=c['input'],input_sha256=c['input_sha256'],log=str(folder.parent/(mode+'.log') if args.mode=='auto' else out/(c['id']+'.log')),arguments=arguments)
                 active[idle]=dict(index=i,mode=mode,folder=folder,peak=peak,reuse=reuse is not None)
                 pool_stats['resident_reuses' if idle.pid else 'process_starts']+=1

@@ -239,6 +239,8 @@ def calibrate_height(arrays, confidence, fps):
     arrays['positions'][:,:,2] -= drift[:,None]
     for side in ('Left','Right'):
         for key in ('heel','toe'): arrays[side+'_'+key][:,2] -= drift
+        if side+'_sole_corners' in arrays:
+            arrays[side+'_sole_corners'][:, :, 2] -= drift[:, None]
         arrays[side+'_all'] -= drift
     arrays.update(vertical_drift=drift,static_support_evidence=valid,drift_observed=w>0)
     return dict(method='stationarity_weighted_common_vertical_drift_v1',support_observed_fraction=float(np.mean(w>0)),
@@ -248,7 +250,7 @@ def calibrate_height(arrays, confidence, fps):
 
 
 def prepare(path, output, body_models, *, input_fps=None, up_axis=None, units=None,
-            grounding='off', max_frames=None):
+            grounding='off', max_frames=None, sole_corners=False):
     from scipy.spatial.transform import Rotation, Slerp
     try:
         import torch
@@ -300,6 +302,19 @@ def prepare(path, output, body_models, *, input_fps=None, up_axis=None, units=No
         ids = np.flatnonzero(weights[:,[ankle,toe]].sum(1)>.5)
         sole = ids[vn[ids,1]<vn[ids,1].min()+.012]
         regions[side] = dict(all=ids,heel=sole[vn[sole,2]<=np.percentile(vn[sole,2],25)],toe=sole[vn[sole,2]>=np.percentile(vn[sole,2],75)])
+    if sole_corners:
+        corner_regions = {}
+        for side, region in regions.items():
+            pairs = []
+            for end in ('heel', 'toe'):
+                ids = region[end]
+                middle = np.median(vn[ids, 0])
+                low, high = ids[vn[ids, 0] < middle], ids[vn[ids, 0] >= middle]
+                if not len(low) or not len(high):
+                    break
+                pairs.extend((low, high))
+            if len(pairs) == 4:
+                corner_regions[side] = pairs
     chunks={}; joints=[]; rotations=[]
     for start in range(0,len(times),32):
         with torch.no_grad(): result = call({k:v[start:start+32] for k,v in sampled.items()})
@@ -313,6 +328,10 @@ def prepare(path, output, body_models, *, input_fps=None, up_axis=None, units=No
             for key,ids in regions_side.items():
                 val = v[:,ids,2].min(1) if key=='all' else v[:,ids].mean(1)
                 chunks.setdefault(side+'_'+key,[]).append(val)
+        if sole_corners:
+            for side, pairs in corner_regions.items():
+                corners = np.stack([v[:, ids].mean(1) for ids in pairs], axis=1)
+                chunks.setdefault(side+'_sole_corners', []).append(corners)
     # Neutral anatomy is always represented in canonical Z-up, independently of animated input coordinates.
     canonical = np.array([[1.,0,0],[0,0,-1],[0,1,0]])
     arrays = dict(positions=np.concatenate(joints),rotations=np.concatenate(rotations),
@@ -346,13 +365,14 @@ def main():
     parser.add_argument('--up-axis',choices=['y','z'])
     parser.add_argument('--units',choices=['m'])
     parser.add_argument('--grounding',choices=['off','contact'],default='off')
+    parser.add_argument('--sole-corners', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--max-frames',type=int)
     args = parser.parse_args()
     try:
         if args.output:
             if not args.body_models: raise InputError('--body-models is required for geometry preparation')
             report=prepare(args.input,args.output,args.body_models,input_fps=args.input_fps,up_axis=args.up_axis,
-                           units=args.units,grounding=args.grounding,max_frames=args.max_frames)
+                           units=args.units,grounding=args.grounding,max_frames=args.max_frames,sole_corners=args.sole_corners)
         else:
             _,conf,report=normalize(read_container(args.input),input_fps=args.input_fps,up_axis=args.up_axis,units=args.units)
             if args.grounding=='contact' and conf is None: raise InputError('Contact grounding requires static confidence')

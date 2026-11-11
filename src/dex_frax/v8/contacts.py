@@ -76,6 +76,10 @@ def prepare(t,robot,cfg,enabled=True):
     t['root_p']=(t['hips']-origin)*scale
     t['scale']=scale;t['floor']=ground;t['world_origin']=origin
     t['ground_calibration']=calibration
+    v2 = cfg.get('policy') == 'v2'
+    minimum_frames = max(3, round(cfg['stable_duration_s'] * fps))
+    if v2:
+        from .foot_contact_v2 import orientation_targets, support_labels
     for s,v in t['sides'].items():
         g=robot.sides[s];r=v['foot_r'].copy()
         hm,hs,hj=stable_mask(v['heel'],fps,ground,cfg);tm,ts,tj=stable_mask(v['toe'],fps,ground,cfg)
@@ -90,6 +94,8 @@ def prepare(t,robot,cfg,enabled=True):
         flat=hm&tm&(tilt<cfg['flatness_deg'])&(np.abs(v['heel'][:,2]-v['toe'][:,2])<spread_limit)
         labels=np.zeros(n,np.int8)
         labels[tm&~flat]=2;labels[hm&~flat&~tm]=3;labels[flat]=1
+        if v2:
+            labels = support_labels(v['heel'], v['toe'], hm, tm, minimum_frames, cfg['v2'])
         # Foot center scales in world XYZ. Robot ankle offset comes from its
         # actual sole, not a copied human ankle height or ankle-to-toe pitch.
         center=((v['heel']+v['toe'])/2-origin)*scale
@@ -99,35 +105,47 @@ def prepare(t,robot,cfg,enabled=True):
         pos[:,2]=desired_low-minlocal
         rawpos=pos.copy();rawr=r.copy();weights=np.zeros(n);anchors=np.zeros((n,3));pivots=np.zeros((n,3));segments=[]
         if not enabled:labels[:]=0
-        # Whole accepted intervals are 3D anchors. Do not lock intended slides:
-        # reject a run whose human pivot travels beyond the acceptance radius.
-        for label,pivot_name in [(1,'sole'),(2,'toe'),(3,'heel')]:
-            src=(v['heel']+v['toe'])/2 if label==1 else v[pivot_name]
-            for a,b in runs(labels==label):
-                if b-a<max(3,round(cfg['stable_duration_s']*fps)):
-                    labels[a:b]=0;continue
-                med=np.median(src[a:b],axis=0)
-                excursion=np.max(np.linalg.norm(src[a:b]-med,axis=1))
-                if excursion>cfg['max_anchor_excursion_m']:
-                    labels[a:b]=0;continue
-                local=np.broadcast_to(g[pivot_name],(b-a,3)).copy()
-                rawpivot=rawpos[a:b]+np.einsum('nij,nj->ni',rawr[a:b],local)
-                anchor=np.median(rawpivot,axis=0);anchor[2]=0.
-                target_r=rawr[a:b].copy()
-                if label==1:
-                    avg=Rotation.from_matrix(target_r).mean().as_matrix()
-                    target_r[:]=frame_xz(avg[:,0],np.array([0.,0.,1.]))
-                # Toe/heel contact retains full changing foot orientation:
-                # only the support point is pinned, permitting a heel lift.
-                target_p=anchor-np.einsum('nij,nj->ni',target_r,local)
-                # A semantic toe marker is not necessarily a shoe-surface
-                # vertex. Its XY stays anchored; the ACTUAL lowest mesh Z
-                # equals the ground. Ankle XYZ still has a full 3D pose target.
-                target_p[:,2]=-np.min(target_r[:,2,:]@g['hull'].T,axis=1)
-                pos[a:b]=target_p;r[a:b]=target_r
-                weights[a:b]=1.;anchors[a:b]=anchor;pivots[a:b]=local
-                segments.append({'start':int(a),'end':int(b),'phase':pivot_name,'label':label,
-                    'anchor_m':anchor.tolist(),'source_excursion_m':float(excursion)})
+        # Keep only intervals with a stable source pivot. Select all accepted
+        # intervals before constructing v2's continuous correction envelope.
+        accepted = []
+        for label, pivot_name in [(1, 'sole'), (2, 'toe'), (3, 'heel')]:
+            src = (v['heel'] + v['toe']) / 2 if label == 1 else v[pivot_name]
+            for a, b in runs(labels == label):
+                if b - a < minimum_frames:
+                    labels[a:b] = 0
+                    continue
+                median = np.median(src[a:b], axis=0)
+                excursion = np.max(np.linalg.norm(src[a:b] - median, axis=1))
+                if excursion > cfg['max_anchor_excursion_m']:
+                    labels[a:b] = 0
+                    continue
+                accepted.append((a, b, label, pivot_name, excursion))
+        free_base = rawpos
+        if v2:
+            r, flat_confidence, side_evidence, roll_level = orientation_targets(
+                rawr, labels, v, hm, tm, hs, ts, ground, fps, cfg,
+            )
+            v.update(foot_flat_confidence=flat_confidence, foot_side_evidence=side_evidence,
+                     foot_roll_level_weight=roll_level)
+            pos = center - np.einsum('nij,j->ni', r, g['sole'])
+            pos[:, 2] = desired_low - np.min(r[:, 2, :] @ g['hull'].T, axis=1)
+            free_base = pos.copy()
+        for a, b, label, pivot_name, excursion in accepted:
+            local=np.broadcast_to(g[pivot_name],(b-a,3)).copy()
+            rawpivot=rawpos[a:b]+np.einsum('nij,nj->ni',rawr[a:b],local)
+            anchor=np.median(rawpivot,axis=0);anchor[2]=0.
+            target_r = r[a:b].copy() if v2 else rawr[a:b].copy()
+            if not v2 and label==1:
+                avg=Rotation.from_matrix(target_r).mean().as_matrix()
+                target_r[:]=frame_xz(avg[:,0],np.array([0.,0.,1.]))
+            # Anchor the semantic pivot in XY and align the actual shoe
+            # minimum to the floor, using the corrected orientation.
+            target_p=anchor-np.einsum('nij,nj->ni',target_r,local)
+            target_p[:,2]=-np.min(target_r[:,2,:]@g['hull'].T,axis=1)
+            pos[a:b]=target_p;r[a:b]=target_r
+            weights[a:b]=1.;anchors[a:b]=anchor;pivots[a:b]=local
+            segments.append({'start':int(a),'end':int(b),'phase':pivot_name,'label':label,
+                'anchor_m':anchor.tolist(),'source_excursion_m':float(excursion)})
         segments.sort(key=lambda s:s['start'])
         # If support changes type without a swing interval, carry the old
         # foot's placement into the new pivot, rather than invent a new step.
@@ -148,14 +166,19 @@ def prepare(t,robot,cfg,enabled=True):
         for seg in segments:
             a,b=seg['start'],seg['end']
             for edge,sgn in [(a,-1),(b-1,1)]:
-                dp=pos[edge]-rawpos[edge];dr=Rotation.from_matrix(rawr[edge].T@r[edge]).as_rotvec()
+                dp = pos[edge] - free_base[edge]
+                dr = np.zeros(3) if v2 else Rotation.from_matrix(rawr[edge].T@r[edge]).as_rotvec()
                 for k in range(1,ramp+1):
                     j=edge+sgn*k
                     if j<0 or j>=n or corrected[j]:break
                     w=smoother(1-k/(ramp+1));delta[j]+=w*dp;rsum[j]+=w*dr;wsum[j]+=w
         den=np.maximum(1.,wsum)
         pos[~corrected]+=delta[~corrected]/den[~corrected,None]
-        r[~corrected]=rawr[~corrected]@Rotation.from_rotvec(rsum[~corrected]/den[~corrected,None]).as_matrix()
+        if v2:
+            minimum = -np.min(r[~corrected, 2, :] @ g['hull'].T, axis=1)
+            pos[~corrected, 2] = np.maximum(pos[~corrected, 2], minimum)
+        else:
+            r[~corrected]=rawr[~corrected]@Rotation.from_rotvec(rsum[~corrected]/den[~corrected,None]).as_matrix()
         v.update(foot_target_p=pos,foot_target_r=r,contact=weights,phase=labels,anchors=anchors,pivots=pivots,
                  segments=segments,raw_foot_p=rawpos,raw_foot_r=rawr,heel_speed=hs,toe_speed=ts)
     from .multicontact import prepare as prepare_body_contacts

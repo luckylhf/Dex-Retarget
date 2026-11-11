@@ -15,6 +15,10 @@ def load(path, fps=None):
   raise ValueError('Invalid prepared SMPL-X geometry shape')
  for key in ('positions','rotations','neutral_positions','Left_heel','Left_toe','Right_heel','Right_toe'):
   if not np.isfinite(data[key]).all():raise ValueError('Nonfinite prepared SMPL-X geometry: '+key)
+ for side in ('Left', 'Right'):
+  corners = data.get(side+'_sole_corners')
+  if corners is not None and (corners.shape != (n, 4, 3) or not np.isfinite(corners).all()):
+   raise ValueError('Invalid SMPL-X sole corner geometry: '+side)
  return SimpleNamespace(data=data,metadata=meta,fps=50.,input_fps=meta['fps'],input_frames=meta['frames'],local_p=data['positions'],local_r=data['rotations'])
 
 def adapt(motion,source=None):
@@ -46,4 +50,6 @@ def adapt(motion,source=None):
   fw=rot(low+'_elbow')@fwlocal;fw=unit(fw-lower*(fw*lower).sum(1,keepdims=True))
   heel=z[s+'_heel'];toe=z[s+'_toe'];foot=frame_xz(toe-heel,rot(low+'_ankle')@np.array([0.,1.,0.]))
   t['sides'][s]=dict(hip=p[s+'UpLeg'],knee=p[s+'Leg'],ankle=p[s+'Foot'],thigh=unit(p[s+'Leg']-p[s+'UpLeg']),shin=unit(p[s+'Foot']-p[s+'Leg']),upper=upper,lower=lower,elbow_axis=elbow,signed_elbow_bend=bend,elbow_calibration=dict(method='SMPL-X upper-arm-frame median axis from bent frames',local_axis=axis.tolist(),check_frames=int(valid.sum())),hand_forward=forward,hand_width=width,forearm_width=fw,foot_r=foot,heel=heel,toe=toe,foot_calibration='SMPL-X skin sole regions from same-beta neutral geometry; global ankle up; no per-frame grounding',hand_method=('SMPL-X explicit hand poses' if motion.metadata['hands_observed'] else 'SMPL-X relaxed default hands; not measured'))
+  if s+'_sole_corners' in z:
+   t['sides'][s]['sole_corners'] = z[s+'_sole_corners']
  return t

@@ -7,15 +7,25 @@ import os
 from pathlib import Path
 import time
 
+from .contract import DEFAULT_FOOT_CONTACT
+
 
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _json_scalar(value):
+    import numpy as np
+
+    if isinstance(value, (np.bool_, np.integer, np.floating)):
+        return value.item()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def atomic_json(path, value):
     path = Path(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2))
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=_json_scalar))
     os.replace(tmp, path)
 
 
@@ -96,7 +106,7 @@ def convert(args):
         meta = run(args.input, pkl, source=args.source, fps=50., max_frames=args.max_frames,
                    initial_solver=solve, refine=args.mode != "frax",
                    prepared_input=getattr(args,"smplx_prepared",None),
-                   unified_repair=getattr(args,"unified_repair",False),repair_similarity=getattr(args,"repair_similarity","soft"), profile=getattr(args,"profile",None), repair_budget=getattr(args,"repair_budget",None),continue_from=continuation,resume_recheck=getattr(args,'resume_recheck',False),allow_local_slowdown=getattr(args,'allow_local_slowdown',False),bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'))
+                   unified_repair=getattr(args,"unified_repair",False),repair_similarity=getattr(args,"repair_similarity","soft"), profile=getattr(args,"profile",None), repair_budget=getattr(args,"repair_budget",None),continue_from=continuation,resume_recheck=getattr(args,'resume_recheck',False),allow_local_slowdown=getattr(args,'allow_local_slowdown',False),bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'),foot_contact=getattr(args,'foot_contact',DEFAULT_FOOT_CONTACT))
         from .acceptance import evaluate
         from .resource_events import phase
         result = meta.pop('_unified_quality',None)
@@ -172,7 +182,7 @@ def batch(args):
         if time.perf_counter()-started < args.budget:
             case=argparse.Namespace(input=manifest_path.parent/row['input'],output=out/row['id'],
                 source=row['source'],mode=args.mode,iterations=args.iterations,
-                initial_iterations=args.initial_iterations,max_frames=None,legacy_frax=False,bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'))
+                initial_iterations=args.initial_iterations,max_frames=None,legacy_frax=False,bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'),foot_contact=getattr(args,'foot_contact',DEFAULT_FOOT_CONTACT))
             try:
                 with (out/(row['id']+'.log')).open('w') as stream, contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
                     result=convert(case)
@@ -199,6 +209,7 @@ def main():
     conv.add_argument('--bvh-units',choices=['cm','m','mm'],default='cm',help='BVH length units; default cm, never inferred')
     conv.add_argument('--bvh-translations',choices=['absolute','offset'],default='absolute',help='BVH position channels: absolute values or deltas added to OFFSET')
     conv.add_argument("--mode", choices=["fast", "refine"], default="fast")
+    conv.add_argument('--foot-contact', choices=['v1', 'v2'], default=DEFAULT_FOOT_CONTACT, help=f'Foot contact target policy (default: {DEFAULT_FOOT_CONTACT})')
     conv.set_defaults(repair_similarity='soft')
     conv.add_argument('--continue-from',type=Path,help='Refine only: continue a checked checkpoint into a new directory without rerunning IK')
     conv.add_argument('--recheck-from',type=Path,help='Refine only: after code updates, verify source/model and artifacts, freshly audit, preserve motion/reference, rebuild repair queue')
@@ -219,6 +230,7 @@ def main():
     batching.add_argument('--bvh-units',choices=['cm','m','mm'],default='cm',help='BVH length units; default cm, never inferred')
     batching.add_argument('--bvh-translations',choices=['absolute','offset'],default='absolute',help='BVH position channels: absolute values or deltas added to OFFSET')
     batching.add_argument('--mode',choices=['fast','refine'],default='fast')
+    batching.add_argument('--foot-contact', choices=['v1', 'v2'], default=DEFAULT_FOOT_CONTACT, help=f'Foot contact target policy (default: {DEFAULT_FOOT_CONTACT})')
     batching.set_defaults(repair_similarity='soft')
     batching.add_argument('--iterations',type=int,default=8)
     batching.add_argument('--initial-iterations',type=int,default=100)

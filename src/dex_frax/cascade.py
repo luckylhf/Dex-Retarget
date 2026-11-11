@@ -9,6 +9,7 @@ import re
 import sys
 import time
 from .cli import atomic_json, sha
+from .contract import DEFAULT_FOOT_CONTACT
 
 from .dispatch import STAGES,pipeline_stages,use_unified
 
@@ -153,7 +154,7 @@ def run(args,worker_factory=Worker):
                     state='budget_exhausted';break
                 case_dir=out if getattr(args,'single_pipeline',False) else out/source['id'];case_dir.mkdir(exist_ok=True)
                 folder=case_dir/mode
-                arguments=dict(bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'),input=source['input'],output=str(folder),source=source['source'],mode=mode,
+                arguments=dict(bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'),foot_contact=getattr(args,'foot_contact',DEFAULT_FOOT_CONTACT),input=source['input'],output=str(folder),source=source['source'],mode=mode,
                     iterations=args.iterations,initial_iterations=args.initial_iterations,max_frames=getattr(args,'max_frames',None),
                     legacy_frax=False,reuse_initial_from=None,require_initial_reuse=False,
                     pipeline=getattr(args,'pipeline','unified'),unified_repair=use_unified(args),repair_similarity=getattr(args,'repair_similarity','soft'),profile=getattr(args,'profile',None),repair_budget=getattr(args,'repair_budget',None),allow_local_slowdown=getattr(args,'allow_local_slowdown',False),resume_recheck=getattr(args,'resume_recheck',False),continue_from=getattr(args,'continue_from',None))

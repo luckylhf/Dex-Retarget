@@ -155,11 +155,11 @@ body_models/
 | 路径 | 用途 |
 |---|---|
 | `examples/bvh/nobody/nobody.bvh` | 可直接转换的 mocap 骨架 BVH：2085 帧、90 fps、厘米、Y-up |
-| `examples/bvh/nobody/nobody_50Hz-Retarget.npz` | 该输入的 50 Hz 参考输出，1158 帧 |
+| `examples/bvh/nobody/` | `nobody_v1-50Hz-Retarget.npz`、`nobody_v2-50Hz-Retarget.npz`，各 1158 帧；`nobody_逐帧对照.csv` |
 | `examples/smplx/gbtc/gbtc.pt` | 420 帧、30 fps 的 GVHMR 人体缓存；需另备 SMPL-X 模型和依赖 |
-| `examples/smplx/gbtc/gbtc_50Hz-Retarget.npz` | 该输入的 50 Hz 参考输出，699 帧 |
+| `examples/smplx/gbtc/` | `gbtc_v1-50Hz-Retarget.npz`、`gbtc_v2-50Hz-Retarget.npz`，各 699 帧；`gbtc_逐帧对照.csv` |
 
-参考 NPZ 是机器人动作（格式见下节），只能用于对照，不能当作人体输入，也不表示当前版本的验收结果。
+`v1` / `v2` 对应 `--foot-contact v1` / `v2`（默认 v2）。参考 NPZ 是机器人动作（格式见下节），只能用于对照，不能当作人体输入，也不表示当前版本的验收结果。逐帧 CSV 列出两版的关节最大差异、根平移差异，以及左右脚的支撑相位、目标与实际 roll、sole 三轴角、鞋底与外缘最低点。
 
 ## 输出格式
 

@@ -8,6 +8,7 @@ import argparse,hashlib,json,pickle,time
 from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
+from ..contract import DEFAULT_FOOT_CONTACT
 from .bvh import load
 from .source import adapt
 from .robot import Robot,DEFAULT_MODEL,DEFAULT_URDF
@@ -28,13 +29,18 @@ def support_solver(cfg):
     if mode=='legacy_slsqp':return legacy_support
     raise ValueError('Unknown support_refinement: '+str(mode))
 
-def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,max_frames=None,no_contacts=False,initial_solver=None,refine=True,prepared_input=None,unified_repair=False,repair_similarity='soft',profile=None,repair_budget=None,continue_from=None,resume_recheck=False,allow_local_slowdown=False,bvh_units='cm',bvh_translations='absolute'):
+def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,max_frames=None,no_contacts=False,initial_solver=None,refine=True,prepared_input=None,unified_repair=False,repair_similarity='soft',profile=None,repair_budget=None,continue_from=None,resume_recheck=False,allow_local_slowdown=False,bvh_units='cm',bvh_translations='absolute',foot_contact=DEFAULT_FOOT_CONTACT):
     from ..resource_events import phase
     phase('preprocessing',compile_possible=initial_solver is not None and not getattr(initial_solver,'strict',False))
     start=time.monotonic();output=Path(output)
     output.parent.mkdir(parents=True,exist_ok=True)
     if output.exists():raise FileExistsError('Refusing to overwrite '+str(output))
     cfg=json.loads((ROOT/'config.json').read_text()) if config is None else json.loads(Path(config).read_text())
+    if foot_contact == 'v2':
+        from .foot_contact_v2 import DEFAULTS
+        cfg['contact'].update(policy='v2', v2=dict(DEFAULTS))
+    elif foot_contact != 'v1':
+        raise ValueError(f'Unknown foot contact policy: {foot_contact}')
     from ..arm_policy import POLICY as ARM_POLICY
     if unified_repair and repair_similarity=='soft':cfg['solver']['arm_repair_policy']=ARM_POLICY
     constrain_support=support_solver(cfg['solver'])
@@ -162,6 +168,10 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
     diagnostics['source_expected_contact']=t['source_expected_contact'];diagnostics['source_airborne']=t['source_airborne']
     for contact in t['body_contacts']:
         for k in ['mode','confidence','anchors','source_surface_height','source_surface_point']:diagnostics['body_'+contact['body_name']+'_'+k]=contact[k]
+    if foot_contact == 'v2':
+        for side, values in t['sides'].items():
+            for name in ('foot_flat_confidence', 'foot_side_evidence', 'foot_roll_level_weight'):
+                diagnostics[f'{side}_{name}'] = values[name]
     np.savez_compressed(output.with_suffix('.diagnostics.npz'),**diagnostics)
     from ..identity import CONVERTER_RELEASE,SOLVER_POLICY
     meta={'profile':profile,'converter_version':8,'generation_mode':'frax_v8_from_original_bvh' if initial_solver is not None else 'v8_reference_from_original_bvh','pose_solver':'frax_diff_ik' if initial_solver is not None else 'v8_trf','converter_release':CONVERTER_RELEASE,'solver_policy':SOLVER_POLICY,

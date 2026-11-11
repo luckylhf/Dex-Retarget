@@ -52,16 +52,18 @@ python3.12 -m venv .venv
 
 BVH 来源使用 `lafan`、`soma` 或 `mocap`；`mocap` 需要已适配的骨架，不能直接接收任意 BVH。BVH 默认厘米、`absolute` 位置通道，可通过 `--bvh-units` 和 `--bvh-translations` 指定。
 
-`examples/` 只放输入和一份参考输出：
+`examples/` 提供人体输入、两版机器人动作和逐帧对照：
 
-| 文件 | 内容 |
+| 路径 | 内容 |
 |---|---|
 | `examples/bvh/nobody/nobody.bvh` | 2085 帧、90 fps 的 mocap 骨架 BVH（厘米、Y-up），配合 `--source mocap` |
-| `examples/bvh/nobody/nobody_50Hz-Retarget.npz` | 该输入的 50 Hz 参考输出，1158 帧 |
+| `examples/bvh/nobody/` | `nobody_v1-50Hz-Retarget.npz`、`nobody_v2-50Hz-Retarget.npz`，各 1158 帧；`nobody_逐帧对照.csv` |
 | `examples/smplx/gbtc/gbtc.pt` | 420 帧、30 fps 的 GVHMR SMPL-X 参数缓存，需另备人体模型与依赖 |
-| `examples/smplx/gbtc/gbtc_50Hz-Retarget.npz` | 该输入的 50 Hz 参考输出，699 帧 |
+| `examples/smplx/gbtc/` | `gbtc_v1-50Hz-Retarget.npz`、`gbtc_v2-50Hz-Retarget.npz`，各 699 帧；`gbtc_逐帧对照.csv` |
 
-参考 `.npz` 与转换结果的 `motion.npz` 同格式（`root_pos`、`root_rot`（XYZW）、`dof_pos`、`joint_names`、`quat_order`、`model_sha256`、`robot`），用于数值对照；`preview` 只接受 PKL，不能直接播放这两个文件。示例只用于跑通流程，参考输出不代表当前 `accepted` 结论。
+`v1` / `v2` 对应 `--foot-contact v1` / `v2`（默认 v2，见下文）。两版 NPZ 均为 50 Hz，与转换生成的 `motion.npz` 同格式：`root_pos`、`root_rot`（XYZW）、`dof_pos`、`joint_names`、`quat_order`、`model_sha256`、`robot`。逐帧 CSV 对比两版的关节最大差异和根平移差异，以及左右脚的支撑相位、目标与实际 roll、sole 三轴角、鞋底与外缘最低点。
+
+`preview` 只接受转换结果中的 `motion.pkl`，不能直接播放这些参考 NPZ；它们用于数值对照，不代表当前 `accepted` 结论。
 
 SMPL-X 输入先按 [输入规范](docs/INPUTS.md#smpl-x) 配置 `SMPLX_PYTHON` 和 `SMPLX_MODEL_DIR`，再运行：
 
@@ -74,6 +76,12 @@ SMPL-X 输入先按 [输入规范](docs/INPUTS.md#smpl-x) 配置 `SMPLX_PYTHON` 
 ```
 
 `--input-fps` 应填真实源帧率，`.pt` 后缀本身不代表 30 Hz。示例中的 `.pt` 是人体输入，已有机器人 `.npz` / `.pkl` 不能作为 SMPL-X 参数输入。
+
+### 足部接触规则
+
+单文件转换和 BVH 批处理默认使用 v2.0。单端支撑要求另一端持续抬起，足姿修正以约 0.1 秒过渡。SMPL-X 鞋底四区域的几何用于调节支撑侧倾，BVH 使用保守的侧倾目标。
+
+复算 v1.0 动作时加 `--foot-contact v1`。续跑时使用与原任务相同的足部接触规则。
 
 ## 查看与使用结果
 
