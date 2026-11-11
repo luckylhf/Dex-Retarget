@@ -1,10 +1,10 @@
 # 批处理与资源管理
 
-批处理只接收 BVH。单条 SMPL-X 动作使用 `convert`，见 [输入规范](INPUTS.md)。
+批处理仅接收 BVH；SMPL-X 使用单文件 `convert`，见 [输入规范](INPUTS.md)。
 
-## 生成输入清单
+## 创建清单
 
-在项目根目录执行以下脚本，修改 `root` 和 `source`：
+在项目根目录执行，按实际数据修改 `root`、`source` 和文件匹配规则：
 
 ```sh
 .venv/bin/python - <<'PY'
@@ -13,96 +13,91 @@ import json
 from pathlib import Path
 
 root = Path('examples/inputs/bvh/nobody').resolve()
-source = 'mocap'  # LAFAN1 用 lafan；SOMA Uniform 用 soma
-inputs = sorted(root.rglob('*without_calibration.bvh'))  # 自有数据可改为 *.bvh
+source = 'mocap'  # LAFAN1 用 lafan，SOMA Uniform 用 soma
+inputs = sorted(root.rglob('*without_calibration.bvh'))
 if not inputs:
-    raise SystemExit('没有找到 BVH，请检查目录与文件匹配规则')
+    raise SystemExit('没有找到 BVH，请检查目录与匹配规则')
 cases = [dict(id=f'motion_{i:06d}', input=str(p), source=source,
               input_sha256=hashlib.sha256(p.read_bytes()).hexdigest())
          for i, p in enumerate(inputs)]
-Path('manifest.json').write_text(json.dumps(dict(cases=cases), ensure_ascii=False, indent=2))
+Path('manifest.json').write_text(
+    json.dumps(dict(cases=cases), ensure_ascii=False, indent=2), encoding='utf-8')
 PY
 ```
 
-清单结构：
+每条记录包含唯一 `id`、`input`、`source` 和真实 `input_sha256`。输入路径可为绝对路径或相对于清单的路径。`id` 以字母或数字开头，仅允许字母、数字、点、下划线和连字符。
 
-```json
-{
-  "cases": [
-    {
-      "id": "walk_001",
-      "input": "/path/to/walk.bvh",
-      "source": "lafan",
-      "input_sha256": "该文件的真实 SHA-256"
-    }
-  ]
-}
-```
+调度器校验全部输入哈希，按文件字节去重，别名写入 `source_aliases.json`；相同内容声明不同来源会报错。一个批次使用相同的 BVH 单位与位置通道约定，不同约定应分批。
 
-`input` 可为绝对路径或相对于清单的路径。`id` 必须唯一，以字母或数字开头，仅含字母、数字、点、下划线和连字符。批处理校验全部输入哈希，按完整 BVH 字节去重，重复项写入 `source_aliases.json`；相同内容指定不同来源会被拒绝。
-
-## 启动、停止和续跑
+## 启动与预算
 
 ```sh
 .venv/bin/dex-frax batch manifest.json outputs/batch --budget 604800
 ```
 
-输出目录必须是新目录。默认 `--mode fast --workers auto`：所有时长动作均完整 Frax 求解、导出和检查，不追加精修。`--mode refine` 才运行持续问题窗口修复。按 BVH 的 `Frames × Frame Time` 从短到长排序，内存不足时等待资源。两种模式均没有独立完整 V8 后续队列。
+首次运行的输出目录必须不存在。默认 `--mode fast --workers auto`，按动作时长从短到长处理；`--mode refine` 才进行窗口修复。待审动作保留完整输出，通过项进入 `accepted.json`。
 
-默认保留 80 GiB 磁盘空间。小批次试跑时，若空余空间不足，可显式加 `--disk-reserve-gib 5`；大批次应按预计输出大小留足空间。磁盘空余低于预留量时，dynamic 和 manual 都会终止本批次工作进程并以 `resource_exhausted` 退出；释放空间后，使用同一清单、原输出目录及资源参数加 `--resume` 手动续跑。
+| 参数 | 默认或用途 |
+|---|---|
+| `--budget` | 批次总预算，默认 1800 秒；耗尽时终止在途任务 |
+| `--frax-timeout` | 单条动作时限，单位秒；该条超时不终止其他动作 |
+| `--repair-budget` | 每条精修的局部修复预算；结束后保存待处理记录 |
+| `--workers` | 最大并发，默认 `auto`；实际并发还受内存准入限制 |
+| `--disk-reserve-gib` | 默认预留 80 GiB；低于底线时停止批次 |
 
-输入错误停止该动作，完整未通过项保留 `review` 和可播放结果。`refine` 只保留通过候选保护的改进，最终仍使用同一验收门槛。
+`refine` 未指定单条时限时，受批次剩余总预算限制。需要保持原节奏时，不启用 `--allow-local-slowdown`；其含义见 [时间映射](PIPELINE.md#帧率与时间映射)。
 
-总预算默认 **1800 秒**，`--budget` 和 `--frax-timeout` 均为秒。`refine` 未显式设定单条超时时，以批次剩余总预算为上限，不再套用短 Frax 的估算超时。可用 `--repair-budget` 单独限制每条的精修部分；这会保存待处理窗口并正常导出待审动作。
-
-- **总预算耗尽：**终止整个批次的在途工作进程，以 `budget_exhausted` 结束。
-- **单条超时：**仅终止对应工作进程；其他动作在剩余预算内继续，不升级到独立 V8。
-
-未完成的结果不会进入验收清单。
-
-运行中停止：
+## 停止与续跑
 
 ```sh
 touch outputs/batch/STOP
 ```
 
-也可向调度器发送 SIGTERM。等待进程退出后，移除 STOP 并续跑：
+也可向调度器发送 SIGTERM。等待进程退出后，在原输出目录续跑：
 
 ```sh
 rm -f outputs/batch/STOP
 .venv/bin/dex-frax batch manifest.json outputs/batch --budget 604800 --resume
 ```
 
-续跑校验清单、输入、实现、资产、依赖、转换参数和已完成产物哈希；保留完成阶段，将未完成阶段归档后重试。资产身份包括目录内的 README 等全部文件，运行中及续跑前均应保持原字节。修改求解、审核或导出实现后应使用新目录。不要在运行中覆盖代码或资产文件。此次模式与验收变更需要新输出目录；不能绕过身份检查续跑旧版本批次。旧产物保留原身份。
+续跑须使用相同清单及匹配的转换、资源参数。程序核验输入、实现、运行资产、依赖和完成产物哈希，保留完成结果并归档未完成尝试。版本或转换规则改变时使用新输出目录。
 
-仅更改 `managed_batch.py` / `resources.py` 的维护场景可显式设置 `DEX_FRAX_ALLOW_SCHEDULER_RESUME=1`，允许调度兼容续跑。其他身份仍严格核验，差异写入 `scheduler_resume.*.json`，原产物身份保留。
+批次 `--resume` 不会自动继续已完成但待审的条目。对此类动作，使用 `convert --mode refine --continue-from outputs/batch/<id>/frax`，提供相同原输入及参数并写入新目录，见 [检查点与续跑](PIPELINE.md#检查点与续跑)。
+
+磁盘不足以 `resource_exhausted` 停止后，释放空间再手动续跑。正常停止会保存检查点；强杀或断电可能丢失最近约 30 秒状态。
 
 ## 资源设置
 
-- CPU：默认以上下文 affinity/cgroup 配额允许的全部逻辑 CPU 为上限，完成即补位；用 `--workers N` 限制并发。每进程单线程、单核绑定，并使用较低调度优先级。实际利用率受编译、I/O 和内存准入影响。
-- 内存：默认 `--resource-mode dynamic --memory-target-percent 90`，目标为系统与程序合计约 90%；计入在途增长和可能的编译峰值。默认启用完成任务的内存峰值学习，内存不够时等待，实际压力下回收空闲进程，优先复用存活的热进程。
-- 磁盘：默认保留 **80 GiB**，可用 `--disk-reserve-gib` 调整。低于预留量时立即停止本批次，释放空间后手动 `--resume`。主机或 cgroup 紧急内存不足时也停止本批次任务。
-- Linux：多进程要求 `systemd-run --user` 建立 cgroup 内存硬限制并禁用交换；无法建立时拒绝启动。`--memory-limit-gib` 可显式收紧硬上限。macOS 使用内存准入和紧急停止，无此 cgroup 硬限制。
-- 固定资源对照：`--resource-mode manual` 默认预留主机内存 10 GiB，无任务在途且内存准入持续不足时按 `--resource-wait` 退出；dynamic 在总预算内等待内存准入恢复。磁盘底线与紧急内存保护均直接停止批次。
+- **CPU：** 默认以上下文允许的逻辑 CPU 数为并发上限，每进程单线程并在支持的平台绑定单核；编译、I/O 和内存会影响实际利用率。
+- **内存：** 默认 `--resource-mode dynamic --memory-target-percent 90`，按系统及其他程序合计占用控制准入，并计入编译峰值与在途增长。无可用内存时在总预算内等待，紧急压力下停止批次。
+- **Linux：** 多进程需要 `systemd-run --user` 建立 cgroup 内存硬限制并禁用交换，无法建立时拒绝启动；可用 `--memory-limit-gib` 收紧上限。macOS 使用准入和紧急停止。
+- **固定资源：** `--resource-mode manual` 默认预留主机内存 10 GiB；无任务在途且持续无法准入时，按 `--resource-wait` 结束等待。
 
-默认状态目录为 `~/.cache/dex-frax`，可用 `DEX_FRAX_STATE_DIR` 指定。批次锁防止同一状态目录重复占用资源；共享 JAX 缓存应仅允许本用户写入。完整参数见 `dex-frax batch --help`。
+小批次可按实际空间设置 `--disk-reserve-gib 5`，大批次按预期输出量留足余量。状态目录默认为 `~/.cache/dex-frax`，可通过 `DEX_FRAX_STATE_DIR` 指定；同目录锁避免重复占用资源。
 
-启动时生成 `resource_policy.json`，也可用 `--resource-policy` 指定已有文件。每 2 秒检查修改，可调整 `workers`、`memory_learning`、`compile_extra_gib` 和 `stages.frax` 的内存估算（旧资源文件中的 `stages.v8` 不再对应执行阶段）；`workers` 不得超过启动上限。建议在生成的完整文件上修改并原子替换，非法配置保留最近有效值。热加载不改变求解参数、质量门槛或 cgroup 硬限制。
+启动后生成 `resource_policy.json`，约每 2 秒检查更新。可调整 `workers`、`memory_learning`、`compile_extra_gib` 和 `stages.frax` 内存估算；并发不能超过启动上限。修改资源策略不改变求解参数或验收门槛。完整选项见 `dex-frax batch --help`。
 
-## 状态和结果
+## 状态与结果
 
 | 文件 | 用途 |
 |---|---|
-| `batch.running.json` | 约每 2 秒更新的阶段、并发、资源及等待原因 |
-| `batch.json` | 每 30 秒及停止时保存的完整检查点、尝试与耗时 |
-| `accepted.json` | 通过的训练文件、相对路径及 SHA-256 |
-| `<id>/selection.json` | 该动作的最终状态、选中模式及路径 |
-| `<id>/frax/` 和 `<id>/frax.log` | 两种模式的动作、报告和日志；`profile` 区分快速/精修 |
+| `batch.running.json` | 约每 2 秒更新阶段、并发、资源与等待原因 |
+| `batch.json` | 约每 30 秒及停止时保存完整检查点 |
+| `accepted.json` | 通过项的训练文件相对路径及 SHA-256；下游读取 `motions` |
+| `<id>/selection.json` | 该动作的最终结果选择 |
+| `<id>/frax/`、`<id>/frax.log` | 动作、报告和日志，模式见 `profile` |
 
-下游读取 `accepted.json` 的 `motions`，路径相对于批次输出目录。`complete` 表示调度完成，逐动作还需区分 `accepted`、`review`、`failed`、`input_error`、`budget_exhausted`、`interrupted`、`resource_exhausted` 和 `identity_changed`。资源或执行失败不能当作动作质量结论。
+调度 `complete` 与动作 `accepted` 分开记录。所有动作均完成时，`accepted` 和 `review` 都返回退出码 0。批次因资源、预算、中断或执行失败未完成时返回非零，具体原因见 `batch.json`。精修的候选与检查点保存在动作目录的 `repair.json` 和 `refine_state.json`。
 
-强杀或断电可能丢失最后 30 秒检查点。使用 STOP 或 SIGTERM 并等待退出，可保留可续跑状态。
+## 对照回归
 
-精修记录在每条动作的 `frax/repair.json`，固定初解在 `frax/frax_baseline/`，队列检查点在 `frax/refine_state.json`。通过项不追加修复。局部检查缓存只存在于进程内，继续时先重新检查当前轨迹。
+回归目录使用同样的 `manifest.json`，每次运行结果保存在 `results/<label>/`。
 
-批次 `--resume` 保留完成结果，未完成尝试按原调度规则归档并重试；不会自动把已完成但待审的条目再精修。对这类动作，使用单文件 `convert --mode refine --continue-from <id>/frax` 写到新目录，继续未完成候选。详见 [精修流程](PIPELINE.md)。
+```sh
+.venv/bin/python scripts/run_regression.py suite --label revised \
+  --source-root src --assets assets/dex_evt --modes fast refine
+.venv/bin/python scripts/compare_regression_runs.py suite \
+  --baseline previous --candidate revised
+```
+
+对照工具也接受放在 `results/` 下的两个批次输出目录。逐帧比较前会核对输入、关节顺序、输出帧率、源时间映射和验收口径。碰撞统计读取全身检查报告。

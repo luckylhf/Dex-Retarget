@@ -17,10 +17,14 @@ def verify(folder,identity,recheck=False):
     from .cli import sha
     old=json.loads((folder/'identity.json').read_text())
     if recheck:
-        safety={'acceptance.py','audit_cache.py','support_quality.py','temporal_quality.py',
+        initial={'ik.py','pelvis_priority.py','kinematics.py','shoulder_reference.py',
+                 'frax_foot_constraints.py','frax_arm_constraints.py'}
+        safety={'acceptance.py','audit_cache.py','support_quality.py','temporal_quality.py','ankle_collision.py',
                 'v8/audit.py','v8/anatomy.py','v8/robot.py','v8/self_collision.py'}
         names=set(old['implementation'])|set(identity['implementation'])
         for name in names:
+            if name in initial and old['implementation'].get(name)!=identity['implementation'].get(name):
+                raise ValueError('Recheck initial solver changed; recompute initial: '+name)
             if name.endswith('.json') or name in safety:
                 if old['implementation'].get(name)!=identity['implementation'].get(name):
                     raise ValueError('Recheck safety policy changed: '+name)

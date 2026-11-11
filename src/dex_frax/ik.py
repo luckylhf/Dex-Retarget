@@ -39,6 +39,27 @@ def initial_branch_count(t):
     return 1 if np.all(mask[18:]) else 3
 
 
+def solve_columns(robot,t):
+    arms=np.asarray(sum([g['arm'] for g in robot.sides.values()],[]),int)
+    mask=np.asarray(t.get('priority_mask',[]),bool)
+    if (t.get('arm_self_collision',False) and not t.get('foot_self_collision',False)
+            and mask.shape==(32,) and np.array_equal(np.flatnonzero(~mask),arms)):
+        return arms
+    legs=np.asarray(sum([g['leg'] for g in robot.sides.values()],[]),int)
+    if (t.get('foot_self_collision',False) and not t.get('arm_self_collision',False)
+            and mask.shape==(32,)):
+        free=np.flatnonzero(~mask)
+        if np.array_equal(free,legs) or np.array_equal(free,np.r_[2,legs]):return free
+    return np.arange(32)
+
+
+@jax.tree_util.register_static
+class HingeSpace:
+    def __init__(self,width):self.nq=self.nv=int(width)
+    def integrate(self,q,v,dt):return q+v*dt
+    def velocity_to_qdot_map(self,q):return jnp.eye(self.nv,dtype=q.dtype)
+
+
 def runtime_keys(robot, t, cfg, iterations, initial_iterations, improved, assets, block_frames=128):
     """Every static residual/constraint input participates in cache identity."""
     geometry = hashlib.sha256()
@@ -47,7 +68,7 @@ def runtime_keys(robot, t, cfg, iterations, initial_iterations, improved, assets
     model = dict(assets=assets, names=robot.names, lower=robot.lower.tolist(),
                  upper=robot.upper.tolist(), speeds=robot.speed_limits.tolist(),geometry=geometry.hexdigest())
     model_key = hashlib.sha256(json.dumps(model,sort_keys=True).encode()).hexdigest()
-    kernel = dict(model=model_key,initial_branches=initial_branch_count(t), foot_geometry=bool(t.get('foot_self_collision',False)), block_frames=block_frames, algorithm='carried_block_scan_v1',fps=float(t['fps']), weights=cfg,
+    kernel = dict(model=model_key,initial_branches=initial_branch_count(t), foot_geometry=bool(t.get('foot_self_collision',False)), arm_geometry=bool(t.get('arm_self_collision',False)), solve_columns=solve_columns(robot,t).tolist(),block_frames=block_frames, algorithm='carried_reduced_height_legs_single_pass_v7',fps=float(t['fps']), weights=cfg,
                   iterations=iterations, initial_iterations=initial_iterations, improved=improved,
                   input_shapes=[(list(a.shape[1:]),str(a.dtype)) for a in jax.tree.leaves(targets(t))],
                   contacts=[dict(body=int(c['body']),hull=np.asarray(c.get('robot_hull',robot.surface_models[c['body']]['hull'])).tolist()) for c in t['body_contacts']])
@@ -56,18 +77,20 @@ def runtime_keys(robot, t, cfg, iterations, initial_iterations, improved, assets
 
 @jax.tree_util.register_static
 class FrameBounds(InequalityConstraint):
-    def __init__(self, robot, lower, upper, step, gain):
+    def __init__(self, robot, lower, upper, step, gain, previous_columns=None, local_columns=None):
         self.robot, self.gain = robot, gain
         self.lower, self.upper, self.step = map(np.asarray, (lower, upper, step))
-        self.G = np.vstack([np.eye(32)[3:], -np.eye(32)[3:]])
-        self.num_rows, self.penalty = 58, 1e8
+        self.previous_columns=np.arange(3,32) if previous_columns is None else np.asarray(previous_columns,int)
+        self.local_columns=(np.arange(3,32) if previous_columns is None else np.arange(len(self.previous_columns))) if local_columns is None else np.asarray(local_columns,int)
+        self.G = np.vstack([np.eye(robot.nv)[self.local_columns], -np.eye(robot.nv)[self.local_columns]])
+        self.num_rows, self.penalty = 2*len(self.local_columns), 1e8
 
     def rows(self, q, ref):
-        lo = jnp.maximum(self.lower, ref["previous"][3:] - self.step)
-        hi = jnp.minimum(self.upper, ref["previous"][3:] + self.step)
+        lo = jnp.maximum(self.lower, ref["previous"][self.previous_columns] - self.step)
+        hi = jnp.minimum(self.upper, ref["previous"][self.previous_columns] + self.step)
         lo = jnp.where(ref["first"], self.lower, lo)
         hi = jnp.where(ref["first"], self.upper, hi)
-        return self.G, self.gain * jnp.concatenate([hi - q[3:], q[3:] - lo])
+        return self.G, self.gain * jnp.concatenate([hi - q[self.local_columns], q[self.local_columns] - lo])
 
 
 def targets(t):
@@ -83,6 +106,11 @@ def targets(t):
     out["body_weights"] = np.stack([
         np.asarray(c["confidence"]) * (np.asarray(c["mode"]) != 0) * c["source_geometry_confidence"]
         for c in t["body_contacts"]], axis=-1) if t["body_contacts"] else np.zeros((len(t["hips"]), 0))
+    if t.get('arm_self_collision',False):
+        from .frax_arm_constraints import source_arm_steps
+        out['arm_source_step']=source_arm_steps(t)
+    if 'shoulder_reference' in t:
+        out['shoulder_reference']=np.asarray(t['shoulder_reference'])
     return out
 
 
@@ -154,6 +182,22 @@ def make_residual(model, robot, t, w):
         add(x - ref["predicted"], w["joint_acceleration"] * f * f * active)
         add(x[:3] - ref["root_velocity_goal"], w["root_velocity"] * f * active)
         add(x[:3] - ref["predicted"][:3], w["root_acceleration"] * f * f * active)
+        if w.get('_arm_continuity_gain',0.):
+            activity=ref.get('arm_activity',jnp.zeros(2))
+            for k,g in enumerate(robot.sides.values()):
+                joint=g['arm'][4]
+                step=x[joint]-ref['previous'][joint]
+                limit=jnp.maximum(ref['arm_source_step'][k],ref.get('arm_previous_step',jnp.zeros(2))[k])
+                add(step-jnp.clip(step,-limit,limit),w['_arm_continuity_gain']*f*active*activity[k])
+                # The source-relative pulse gate also covers wrist impulses.
+                # Keep a dead zone for supported source motion; the original
+                # arm QP can redistribute excess through forearm/wrist axes.
+                wrist_step=x[np.asarray(g['arm'][5:])]-ref['previous'][np.asarray(g['arm'][5:])]
+                wrist_limit=.9*ref['arm_source_step'][k]
+                add(wrist_step-jnp.clip(wrist_step,-wrist_limit,wrist_limit),4*w['_arm_continuity_gain']*f*active)
+        if 'shoulder_reference' in ref:
+            shoulder_ids=np.asarray(sum([g['arm'][:3] for g in robot.sides.values()],[]))
+            add(x[shoulder_ids]-ref['shoulder_reference'],.25*w['arm_direction'])
         return jnp.concatenate(res)
     return residual
 
@@ -179,9 +223,15 @@ class FraxIK:
 
     def __call__(self, robot, t, cfg, progress=None):
         from .resources import CompileLease
+        if (t.get('arm_self_collision',False) and 'priority_pose' in t
+                and 'shoulder_reference' not in t
+                and cfg.get('_shoulder_reference',True)):
+            from .shoulder_reference import prepare
+            t,report=prepare(robot,t,cfg)
+            self.report['shoulder_reference']=report
         if self.assets is None:
-            from .paths import ASSETS
-            self.assets={str(p.relative_to(ASSETS)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(ASSETS.rglob('*')) if p.is_file()}
+            from .paths import asset_fingerprints
+            self.assets = asset_fingerprints()
         keys=runtime_keys(robot,t,cfg,self.iterations,self.initial_iterations,self.improved,self.assets,self.block_frames)
         warm=self.use_cache and keys[0] in _MODELS and keys[1] in _KERNELS
         from .resource_events import phase
@@ -195,11 +245,6 @@ class FraxIK:
         from .resource_events import phase
         phase('ik_prepare',compile_possible=not (self.use_cache and keys[1] in _KERNELS))
         start = time.perf_counter()
-        assets = self.assets
-        if assets is None:
-            from .paths import ASSETS
-            assets = {str(p.relative_to(ASSETS)): hashlib.sha256(p.read_bytes()).hexdigest()
-                      for p in sorted(ASSETS.rglob('*')) if p.is_file()}
         model_key,kernel_key = keys
         model_hit = self.use_cache and model_key in _MODELS
         if model_hit:
@@ -210,6 +255,7 @@ class FraxIK:
             parity = model.verify(robot)
             if self.use_cache: _remember(_MODELS,model_key,(model,parity),4)
         self.report['foot_self_collision_enabled']=bool(t.get('foot_self_collision',False))
+        self.report['arm_self_collision_enabled']=bool(t.get('arm_self_collision',False))
         self.report["fk_parity"] = {**parity, 'reused_verified_model': bool(model_hit)}
         refs = targets(t)
         n, fps = len(t["hips"]), float(t["fps"])
@@ -217,6 +263,9 @@ class FraxIK:
         for g in robot.sides.values():
             x0[g["arm"][3]], x0[g["leg"][3]] = -.4, .15
         if 'priority_pose' in t:x0=np.asarray(t['priority_pose'][0]).copy()
+        if 'shoulder_reference' in t:
+            shoulder_ids=np.asarray(sum([g['arm'][:3] for g in robot.sides.values()],[]))
+            x0[shoulder_ids]=t['shoulder_reference'][0]
         kernel_hit=self.use_cache and kernel_key in _KERNELS
         begin=time.perf_counter()
         if kernel_hit:
@@ -240,6 +289,7 @@ class FraxIK:
             block=jax.tree.map(lambda a:np.pad(a[offset:offset+count],[(0,self.block_frames-count)]+[(0,0)]*(a.ndim-1),mode='edge'),refs)
             carry,(q,records)=compiled(carry,block,np.arange(self.block_frames)<count)
             q,records=jax.device_get((q,records));poses.append(q[:count]);logs.append(records[:count])
+            if progress:progress(offset+count,n)
         x=np.concatenate(poses);records=np.concatenate(logs)
         solve_s=time.perf_counter()-begin
         if not np.isfinite(x).all():raise ValueError('frax produced nonfinite poses')
@@ -256,72 +306,90 @@ class FraxIK:
         self.report['knee_extension_preference']=3. if self.improved else 0.
         self.report['knee_preferred_flexion_deg']=1. if self.improved else 0.
         print(f'frax: {n} frames, compile {compile_s:.2f}s, solve {solve_s:.2f}s, QP nonconverged {self.report["qp_nonconverged_steps"]}',flush=True)
-        if progress:progress(n,n)
         return np.asarray(x),np.asarray(records).tolist()
 
     def _compile(self,model,robot,t,cfg,refs,x0,fps):
+        ids=solve_columns(robot,t);reduced=len(ids)!=32
+        space=HingeSpace(len(ids)) if reduced else model
+        def lift(q,ref):return ref['priority_pose'].at[ids].set(q) if reduced else q
+        def project(q):return q[ids] if reduced else q
         seed={**jax.tree.map(lambda a:a[0],refs),'first':1.,'previous':x0,'predicted':x0,'root_velocity_goal':x0[:3]}
         weights = dict(cfg)
+        if t.get('arm_self_collision',False):weights.setdefault('_arm_continuity_gain',6.)
         if self.improved:
             weights["knee_extension_preference"] = 3.
             weights["knee_preferred_flexion_rad"] = np.deg2rad(1.)
-        residual = make_residual(model, robot, t, weights)
-        rows = jax.eval_shape(residual,jnp.asarray(x0),seed).shape[0]
-        task = ResidualTask(model, residual, rows, gain=fps)
-        bounds = FrameBounds(model, robot.lower[3:] + 1e-7, robot.upper[3:] - 1e-7, robot.joint_step(fps, cfg), fps)
-        constraints=[bounds]
+        full_residual=make_residual(model,robot,t,weights)
+        def residual(q,ref):return full_residual(lift(q,ref),ref)
+        rows=jax.eval_shape(residual,jnp.asarray(x0[ids]),seed).shape[0]
+        task=ResidualTask(space,residual,rows,gain=fps)
+        if reduced:
+            hinges=ids[ids>=3]
+            bounds=FrameBounds(space,robot.lower[hinges]+1e-7,robot.upper[hinges]-1e-7,
+                robot.joint_step(fps,cfg)[hinges-3],fps,previous_columns=hinges,local_columns=np.flatnonzero(ids>=3))
+        else:
+            bounds=FrameBounds(space,robot.lower[3:]+1e-7,robot.upper[3:]-1e-7,robot.joint_step(fps,cfg),fps)
+        constraints=[bounds];arms=None
         if t.get('foot_self_collision',False):
             from .frax_foot_constraints import FootGeometry,FootSupport
-            feet=FootGeometry(model,robot,fps);constraints.extend([feet,FootSupport(model,robot,fps)])
+            feet=FootGeometry(space,robot,fps,columns=ids);constraints.extend([feet,FootSupport(model,robot,fps,columns=ids,space=space)])
             self.report['initial_foot_geometry']=feet.report
-        solver = DiffIKSolver(model, [task], constraints, regularization=1., solver_tol=1e-7)
-        dt = .5 / fps
-
-        def iterate(state, ref, count):
-            # Half Newton steps reduce overshoot at changing mesh minima.
-            def body(_, carry):
-                state, iters, failed = carry
-                if 'priority_pose' in ref:state=state._replace(q=jnp.where(ref['priority_mask'],ref['priority_pose'],state.q))
-                state, _, info = solver.step(state, ref, dt)
-                if 'priority_pose' in ref:state=state._replace(q=jnp.where(ref['priority_mask'],ref['priority_pose'],state.q))
-                return state, iters + info.qp_iters, failed + jnp.logical_not(info.qp_converged).astype(jnp.int32)
-            return jax.lax.fori_loop(0, count, body, (state, jnp.int32(0), jnp.int32(0)))
-
+        if t.get('arm_self_collision',False):
+            from .frax_arm_constraints import ArmGeometry
+            arms=ArmGeometry(space,robot,fps,columns=ids);constraints.append(arms)
+            self.report['initial_arm_geometry']=arms.report
+        self.report['solve_coordinate_count']=len(ids)
+        self.report['arm_continuity_gain']=weights.get('_arm_continuity_gain',0.)
+        solver=DiffIKSolver(space,[task],constraints,regularization=1.,solver_tol=1e-7)
+        dt=.5/fps
+        def iterate(state,ref,count):
+            def body(_,carry):
+                state,iters,failed=carry
+                if 'priority_pose' in ref:
+                    state=state._replace(q=jnp.where(ref['priority_mask'][ids],ref['priority_pose'][ids],state.q))
+                state,_,info=solver.step(state,ref,dt)
+                if 'priority_pose' in ref:
+                    state=state._replace(q=jnp.where(ref['priority_mask'][ids],ref['priority_pose'][ids],state.q))
+                return state,iters+info.qp_iters,failed+jnp.logical_not(info.qp_converged).astype(jnp.int32)
+            return jax.lax.fori_loop(0,count,body,(state,jnp.int32(0),jnp.int32(0)))
         def initialize(initial_q,root):
-            return solver.init(initial_q),initial_q,root,jnp.int32(0)
-
+            return solver.init(project(initial_q)),initial_q,root,jnp.int32(0),initial_q,jnp.zeros(2)
         def first_frame(carry,first):
-            initial_q=carry[0].q
-            ref0 = {**first, "first": 1., "previous": initial_q, "predicted": initial_q, "root_velocity_goal": initial_q[:3]}
-            # Three independent first-frame branches; no CPU IK fallback.
-            branches=initial_branch_count(t)
-            seeds = jnp.tile(initial_q, (branches, 1))
-            for k, yaw in enumerate((-1.2, 1.2) if branches==3 else (), 1):
-                for g in robot.sides.values():
-                    seeds = seeds.at[k,g['arm'][2]].set(yaw).at[k,g['arm'][4]].set(-yaw)
-            states, iterations, failures = jax.vmap(lambda q: iterate(solver.init(q), ref0, self.initial_iterations))(jnp.asarray(seeds))
-            costs = jax.vmap(lambda q: jnp.sum(residual(q, ref0) ** 2))(states.q)
-            best = jnp.argmin(costs)
-            state = jax.tree.map(lambda a: a[best], states)
-            record=jnp.array([costs[best]/2.,iterations[best],failures[best]])
-            return (state,state.q,first['root_p'],jnp.int32(1)),(state.q,record)
-
+            initial_full=carry[4];initial_q=project(initial_full)
+            ref0={**first,'first':1.,'previous':initial_full,'predicted':initial_full,'root_velocity_goal':initial_full[:3]}
+            branches=initial_branch_count(t);seeds=jnp.tile(initial_full,(branches,1))
+            for k,yaw in enumerate((-1.2,1.2) if branches==3 else (),1):
+                for g in robot.sides.values():seeds=seeds.at[k,g['arm'][2]].set(yaw).at[k,g['arm'][4]].set(-yaw)
+            states,iterations,failures=jax.vmap(lambda q:iterate(solver.init(project(q)),ref0,self.initial_iterations))(seeds)
+            costs=jax.vmap(lambda q:jnp.sum(residual(q,ref0)**2))(states.q)
+            best=jnp.argmin(costs);state=jax.tree.map(lambda a:a[best],states)
+            full=lift(state.q,ref0);record=jnp.array([costs[best]/2.,iterations[best],failures[best]])
+            return (state,full,first['root_p'],jnp.int32(1),full,jnp.zeros(2)),(full,record)
         def next_frame(carry,inputs):
-            state,prev2,root_prev,index=carry;previous=state.q
+            state,prev2,root_prev,index,previous,activity=carry
             predicted=jnp.where(index<2,previous,previous+jnp.clip(previous-prev2,-.10,.10))
             root_goal=previous[:3]+inputs['root_p']-root_prev
             ref={**inputs,'first':0.,'previous':previous,'predicted':predicted,'root_velocity_goal':root_goal}
-            state=state._replace(q=state.q.at[:3].set(root_goal))
+            if arms is not None and weights.get('_arm_continuity_gain',0.):
+                proximity=jax.pure_callback(arms.activity,jax.ShapeDtypeStruct((2,),previous.dtype),previous)
+                # A soft release preference decays over half the existing
+                # temporal-quality window; no motor acceleration cap is added.
+                from .temporal_quality import POLICY as TEMPORAL_POLICY
+                decay=np.exp(-1./(fps*TEMPORAL_POLICY['window_s']*.5))
+                from .frax_arm_constraints import release_activity
+                activity,recovery=release_activity(proximity,activity,decay)
+                ref['arm_activity']=recovery
+                ref['arm_previous_step']=jnp.stack([abs(previous[g['arm'][4]]-prev2[g['arm'][4]]) for g in robot.sides.values()])
+            if not reduced:state=state._replace(q=state.q.at[:3].set(root_goal))
             state,count,failed=iterate(state,ref,self.iterations)
-            record=jnp.array([jnp.sum(residual(state.q,ref)**2)/2.,count,failed])
-            return (state,previous,inputs['root_p'],index+1),(state.q,record)
-
+            full=lift(state.q,ref);record=jnp.array([jnp.sum(residual(state.q,ref)**2)/2.,count,failed])
+            return (state,previous,inputs['root_p'],index+1,full,activity),(full,record)
         def run(carry,block,valid):
             def frame(carry,inputs):
                 ref,active=inputs
                 def execute(carry):
                     return jax.lax.cond(carry[3]==0,lambda c:first_frame(c,ref),lambda c:next_frame(c,ref),carry)
-                return jax.lax.cond(active,execute,lambda c:(c,(c[0].q,jnp.zeros(3))),carry)
+                return jax.lax.cond(active,execute,lambda c:(c,(c[4],jnp.zeros(3))),carry)
             return jax.lax.scan(frame,carry,(block,valid))
         sample=jax.tree.map(lambda a:np.repeat(a[:1],self.block_frames,axis=0),refs)
         compiled=jax.jit(run).lower(initialize(jnp.asarray(x0),jnp.asarray(refs['root_p'][0])),sample,np.ones(self.block_frames,bool)).compile()

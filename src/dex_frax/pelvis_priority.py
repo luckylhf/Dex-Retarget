@@ -50,42 +50,41 @@ def waist_trajectory(robot,t,seed,cfg=None,collision_cfg=None,report=None):
     return out,ids
 
 
-def solve_protected(robot,t,cfg,baseline,base_solver,root_mode='source'):
+INITIAL_POLICY='pelvis_waist_joint_height_feet_arms_geometry_v9'
+
+
+def solve_protected(robot,t,cfg,baseline,base_solver,root_mode='source',progress=None):
     from .ik import FraxIK
-    start=time.monotonic();seed=baseline.copy()
+    from .initial_reuse import target_digest
+    start=time.monotonic();seed=baseline.copy();target_sha=target_digest(t)
     if root_mode=='source':seed[:,:3]=t['root_p']
     elif root_mode!='feasible':raise ValueError('Unknown pelvis reference')
-    body_check={}
     legs=np.asarray(sum([g['leg'] for g in robot.sides.values()],[]))
     arms=np.asarray(sum([g['arm'] for g in robot.sides.values()],[]))
-    # Choose only pelvis height for the actual foot geometry. Horizontal
-    # translation stays on the Frax reference; source orientation is prescribed.
-    mask=np.ones(32,bool);mask[legs]=False
-    if root_mode=='feasible':mask[2]=False
-    local_cfg=dict(cfg);local_cfg['leg_direction']=max(float(cfg.get('leg_direction',0.)),float(cfg.get('arm_direction',0.)),2.*float(cfg.get('foot_orientation',0.)))
-    feasibility=FraxIK(base_solver.iterations,base_solver.initial_iterations,improved=False,assets=base_solver.assets)
-    reference=seed.copy()
-    seed,_=feasibility(robot,dict(t,priority_pose=reference,priority_mask=mask,foot_self_collision=True),local_cfg)
-    if not np.array_equal(seed[:,mask],reference[:,mask]):raise ValueError('Pelvis feasibility moved a protected joint')
-    pose,waist=waist_trajectory(robot,t,seed,cfg,report=body_check)
-    reports={};all_records=[];rows=pose.copy()
-    # Two explicit solves: the hands never participate in choosing the feet.
-    for name,moving in [('feet',legs),('arms',arms)]:
-        mask=np.ones(32,bool);mask[moving]=False
-        reference=rows.copy();local=dict(t,priority_pose=reference,priority_mask=mask,foot_self_collision=name=='feet')
+    # Waist orientation and body/body distances are independent of the legs
+    # and a common root translation. Choose it before the single coupled foot
+    # solve, so leg/body geometry already sees the final protected waist.
+    if progress:print('initial: waist',flush=True)
+    body_check={};rows,waist=waist_trajectory(robot,t,seed,cfg,report=body_check)
+    reports={};all_records=[]
+    for name,moving in [('feet',np.r_[2,legs] if root_mode=='feasible' else legs),('arms',arms)]:
+        if progress:print('initial: '+name,flush=True)
+        mask=np.ones(32,bool);mask[moving]=False;reference=rows.copy()
+        local=dict(t,priority_pose=reference,priority_mask=mask,foot_self_collision=name=='feet',arm_self_collision=name=='arms')
         solver=FraxIK(base_solver.iterations,base_solver.initial_iterations,improved=False,assets=base_solver.assets)
         local_cfg=dict(cfg)
         if name=='feet':local_cfg['leg_direction']=max(float(cfg.get('leg_direction',0.)),float(cfg.get('arm_direction',0.)),2.*float(cfg.get('foot_orientation',0.)))
-        rows,records=solver(robot,local,local_cfg)
+        rows,records=solver(robot,local,local_cfg,progress) if progress else solver(robot,local,local_cfg)
         if not np.array_equal(rows[:,mask],reference[:,mask]):raise ValueError('Protected upstream stage moved in '+name+' solve')
-        reports[name]=dict(solver.report,stage_leg_direction_weight=local_cfg.get('leg_direction'));all_records.append(records)
+        if target_digest(t)!=target_sha:raise ValueError('Protected stage mutated prepared targets')
+        reports[name]=dict(solver.report,stage_leg_direction_weight=local_cfg.get('leg_direction'),prepared_targets_sha256=target_sha)
+        all_records.append(records)
     from .local_refine import torso_errors
-    report=dict(reports['arms'])
-    report['qp_nonconverged_steps']=feasibility.report.get('qp_nonconverged_steps',0)+sum(v.get('qp_nonconverged_steps',0) for v in reports.values())
-    # Keep the historical report field while recording each actual substage.
-    return rows,all_records[-1],dict(pelvis_feasibility_solver=feasibility.report,body_geometry_preflight=body_check,torso_reference_error_deg=torso_errors(robot,t,rows).tolist(),
-        policy='pelvis_z_feet_feasibility_waist_feet_arms_v6',root_mode=root_mode,elapsed_s=time.monotonic()-start,
-        limb_solver=report,ordered_limb_solvers=reports,stage_order=['pelvis','waist','feet','arms'],feet_locked_during_arm_solve=True)
+    report=dict(reports['arms']);report['qp_nonconverged_steps']=sum(v.get('qp_nonconverged_steps',0) for v in reports.values())
+    return rows,all_records[-1],dict(body_geometry_preflight=body_check,torso_reference_error_deg=torso_errors(robot,t,rows).tolist(),
+        policy=INITIAL_POLICY,root_mode=root_mode,elapsed_s=time.monotonic()-start,limb_solver=report,
+        prepared_targets_sha256=target_sha,downstream_stages_recomputed_on_actual_timeline=True,ordered_limb_solvers=reports,
+        stage_order=['pelvis','waist','feet','arms'],foot_solver_passes=1,root_height_optimized_with_feet=root_mode=='feasible',feet_locked_during_arm_solve=True)
 
 
 
@@ -108,7 +107,8 @@ class PelvisPriorityIK:
     def __call__(self,robot,t,cfg,progress=None):
         baseline,records=self.base(robot,t,cfg,progress)
         self.baseline=baseline.copy()
-        rows,new_records,detail=solve_protected(robot,t,cfg,baseline,self.settings,self.root_mode)
+        self.settings.assets=self.base.assets
+        rows,new_records,detail=solve_protected(robot,t,cfg,baseline,self.settings,self.root_mode,progress)
         self.report=dict(detail['limb_solver'],body_priority=detail,
                          raw_frax_report=self.base.report)
         self.report['qp_nonconverged_steps']+=self.base.report.get('qp_nonconverged_steps',0)

@@ -14,10 +14,35 @@ def stats(a):
     return {'median':float(np.median(a)),'p95':float(np.percentile(a,95)),'max':float(np.max(a))} if a.size else None
 def ang(a,b):return np.degrees(np.arccos(np.clip(np.sum(unit(a)*unit(b),axis=-1),-1,1)))
 
+def audit_model_path(path, meta, payload):
+    from ..cli import sha
+    from ..paths import ASSETS, asset_fingerprints, is_runtime_asset
+
+    original = Path(meta['model'])
+    expected = meta.get('model_sha256') or payload.get('model_sha256')
+    if payload.get('model_sha256') and expected != payload['model_sha256']:
+        raise ValueError('Motion and metadata model hashes differ')
+    if original.is_file():
+        if expected and sha(original) != expected:
+            raise ValueError('Recorded model XML hash mismatch')
+        return original
+
+    candidate = ASSETS / 'mjcf/dex_29.xml'
+    if not expected or not candidate.is_file() or sha(candidate) != expected:
+        raise ValueError('Recorded model is unavailable. Set DEX_FRAX_ASSETS to matching robot assets.')
+    identity = path.parent / 'identity.json'
+    if identity.is_file():
+        old_assets = json.loads(identity.read_text())['assets']
+        expected_assets = {name: digest for name, digest in old_assets.items() if is_runtime_asset(name)}
+        if asset_fingerprints() != expected_assets:
+            raise ValueError('Configured robot asset hashes differ from the recorded assets')
+    return candidate
+
+
 def audit(path,write=True,cache=None,changed=None):
     path=Path(path);data=pickle.loads(path.read_bytes());meta=json.loads(path.with_suffix('.json').read_text())
     with np.load(path.with_suffix('.diagnostics.npz'),allow_pickle=False) as archive:dg={k:archive[k] for k in archive.files}
-    rob=Robot(meta['model'])
+    rob=Robot(audit_model_path(path,meta,data))
     if data['joint_names']!=rob.names or data['quat_order']!='xyzw':raise ValueError('Export contract mismatch')
     physical_lo=rob.lower.copy();physical_hi=rob.upper.copy()
     if 'anatomy' in meta['configuration']:configure(rob,meta['configuration']['anatomy'])

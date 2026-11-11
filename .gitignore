@@ -9,11 +9,6 @@ outputs/
 .cache/
 # User-facing documentation only; maintenance notes and receipts stay local.
 /maintenance_local/
-/docs/*
-!/docs/PIPELINE.md
-!/docs/INPUTS.md
-!/docs/BATCH.md
-!/docs/FRAX_LICENSE
 # Local StanfordASL/frax upstream checkout; install locally, never commit here.
 /Dex-StanfordASL-frax/
 # Private regression BVHs, manifests, checkpoints and results. Never publish.

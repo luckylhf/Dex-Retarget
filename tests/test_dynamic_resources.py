@@ -81,12 +81,13 @@ def test_dynamic_hard_limit_scales_and_does_not_freeze_startup_free_ram(monkeypa
     assert 'MemorySwapMax=0' in calls[0]
 
 
-def test_batch_cli_defaults_to_dynamic_without_fixed_gib_or_core_count(monkeypatch):
+def test_batch_cli_defaults_to_dynamic_without_fixed_gib_or_core_count(monkeypatch,tmp_path):
     from dex_frax import cli,managed_batch
     calls=[]
-    monkeypatch.setattr('sys.argv',['dex-frax','batch','manifest.json','output'])
+    cli.atomic_json(tmp_path/'batch.json', dict(status='complete'))
+    monkeypatch.setattr('sys.argv',['dex-frax','batch','manifest.json',str(tmp_path)])
     monkeypatch.setattr(r,'contain_linux',lambda args:None)
-    monkeypatch.setattr(managed_batch,'run',lambda args:calls.append(args))
+    monkeypatch.setattr(managed_batch,'run',lambda args:calls.append(args) or [dict(status='review')])
     cli.main();args=calls[0]
     assert args.resource_mode=='dynamic' and args.memory_target_percent==90
     assert args.workers=='auto' and args.memory_reserve_gib is None and args.memory_limit_gib is None

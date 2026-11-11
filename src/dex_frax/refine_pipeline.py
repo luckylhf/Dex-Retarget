@@ -22,10 +22,12 @@ from .unified_repair import quality_guard,dense_geometry,collision_seams,arm_win
 from .similarity import palm_envelope,score
 from .v8.self_collision import CollisionModel,scan,_repair_window
 
-POLICY=dict(name='ordered_support_waist_legs_arms_v4',core_frames=101,padding_frames=20,
+POLICY=dict(name='joint_safety_before_pose_default_v7',core_frames=101,padding_frames=20,
             candidate_seconds=60.,collision_tiers_deg=[10.,20.,30.],
             maximum_windows=None,whole_clip_repair_seconds=None,
-            context_padding_frames=[20,50,100],neighbor_reactivations=None,final_fresh_audit=True)
+            context_padding_frames=[20,50,100],neighbor_reactivations=None,final_fresh_audit=True,
+            shared_safety_kernel=['support','dense_floor','leg_collision'],swept_geometry_steps=8,
+            short_safety_core_frames=21,short_temporal_core_frames=11,jitter_guard='per_joint_and_union')
 
 
 def measurements(cache,robot):
@@ -74,6 +76,7 @@ def masks(quality,cache,robot,groups=None,torso_reference=None):
 
 def guard(robot,t,before,after,original,old_m,new_m,old_q,new_q,old_cache,new_cache,model,job):
     a,b=job['start'],job['end'];stage=job['module'];n=len(before)
+    joint=job.get('hand_leg_route')
     if after.shape!=before.shape or not np.isfinite(after).all():return 'shape_or_nonfinite'
     if not np.array_equal(before[:a],after[:a]) or not np.array_equal(before[b:],after[b:]):return 'outside_window_changed'
     lo=max(0,a-1);hi=min(n,b+1)
@@ -82,30 +85,50 @@ def guard(robot,t,before,after,original,old_m,new_m,old_q,new_q,old_cache,new_ca
     if np.any(abs(np.diff(after[lo:hi,3:],axis=0))*t['fps']>robot.speed_limits+1e-4):return 'speed_or_seam'
     knees=[g['leg'][3] for g in robot.sides.values()]
     if np.any((before[a:b,knees]>=0)&(after[a:b,knees]<-1e-7)):return 'new_knee_hyperextension'
-    if stage in ('arms','collision'):
+    if joint:
+        from .hand_leg_repair import columns,owned_pairs
+        allowed,_,_=columns(model,job['hand_leg_pair_ids'],joint=='cooperate')
+        fixed=np.setdiff1d(np.arange(32),allowed)
+        if not np.array_equal(before[:,fixed],after[:,fixed]):return 'hand_leg_changed_protected_joint'
+        arm_ids=sum([g['arm'][:3] for g in robot.sides.values()],[])
+        if np.any(abs(after[a:b,arm_ids]-original[a:b,arm_ids])>np.deg2rad(30.)+2e-6):return 'fixed_reference_shoulder_cap'
+    elif stage in ('arms','collision'):
         sides=[job['side']] if job['side'] else list(robot.sides)
         fixed=np.setdiff1d(np.arange(32),sum([robot.sides[s]['arm'] for s in sides],[]))
         if not np.array_equal(before[:,fixed],after[:,fixed]):return 'protected_body_changed'
     if not np.array_equal(before[:,:2],after[:,:2]):return 'pelvis_horizontal_changed'
-    if stage=='leg_collision':
+    if stage=='leg_collision' and not joint:
         fixed=np.setdiff1d(np.arange(32),[2]+sum([g['leg'] for g in robot.sides.values()],[]))
         if not np.array_equal(before[:,fixed],after[:,fixed]):return 'leg_repair_changed_upper_body'
     if stage in ('collision','torso'):
         for g in robot.sides.values():
             if stage=='collision' and np.any(abs(after[a:b,g['arm'][:3]]-original[a:b,g['arm'][:3]])>np.deg2rad(30.)+2e-6):return 'fixed_reference_shoulder_cap'
     if np.any(new_m['torso'][a:b]>old_m['torso'][a:b]+.02):return 'torso_frame_regression'
-    reason=palm_envelope({s:{k:v[a:b] for k,v in e.items()} for s,e in old_m['errors'].items()},
-                         {s:{k:v[a:b] for k,v in e.items()} for s,e in new_m['errors'].items()})
+    if joint:
+        # Source-relative envelope, not a ratchet against each incidental gain.
+        from .palm_constraints import SourcePalms
+        palms=SourcePalms(robot,t,original,a,b,list(robot.sides),np.arange(32))
+        reason='palm_absolute_envelope' if any(palms.evaluate(after[i],i-a)[2]>np.deg2rad(.001) for i in range(a,b)) else None
+    else:
+        reason=palm_envelope({s:{k:v[a:b] for k,v in e.items()} for s,e in old_m['errors'].items()},
+                             {s:{k:v[a:b] for k,v in e.items()} for s,e in new_m['errors'].items()})
     if reason:return reason
     if np.any(new_m['contact'][a:b]>np.maximum(.001,old_m['contact'][a:b])+1e-7):return 'foot_anchor_regression'
     local=window_targets(t,lo,hi,n)
-    old_d,old_f=dense_geometry(robot,model,local,before[lo:hi]);new_d,new_f=dense_geometry(robot,model,local,after[lo:hi])
-    if np.any(new_d<np.minimum(old_d,0.)-2e-6):return 'new_or_deeper_collision_sample'
+    from .audit_cache import clear_dense_window
+    certified_clear=(stage not in ('collision','leg_collision') and not joint and
+        clear_dense_window(old_cache,lo,hi,n) and clear_dense_window(new_cache,lo,hi,n))
+    if certified_clear:
+        old_f=np.asarray(old_cache['floor'])[lo*8:(hi-1)*8+1]
+        new_f=np.asarray(new_cache['floor'])[lo*8:(hi-1)*8+1]
+    else:
+        old_d,old_f=dense_geometry(robot,model,local,before[lo:hi]);new_d,new_f=dense_geometry(robot,model,local,after[lo:hi])
+        if np.any(new_d<np.minimum(old_d,0.)-2e-6):return 'new_or_deeper_collision_sample'
     if stage in ('collision','leg_collision'):
-        owned=collision_groups(model)[stage]
+        owned=owned_pairs(model,job['hand_leg_pair_ids'],joint=='cooperate') if joint else collision_groups(model)[stage]
         old_m['owned_collision_deficit']=float(np.maximum(-old_d[:,owned],0.).sum())
         new_m['owned_collision_deficit']=float(np.maximum(-new_d[:,owned],0.).sum())
-    if stage=='leg_collision':
+    if stage=='leg_collision' or joint:
         from .leg_similarity import tradeoff
         def leg_angles(c):return np.column_stack([c['frames']['errors'][s][k][a:b] for s in ('Left','Right') for k in ('thigh_deg','shin_deg')])
         result=tradeoff(leg_angles(old_cache),leg_angles(new_cache),old_m['owned_collision_deficit'],new_m['owned_collision_deficit'])
@@ -115,6 +138,9 @@ def guard(robot,t,before,after,original,old_m,new_m,old_q,new_q,old_cache,new_ca
     for name,values in old_cache['frames']['body_errors'].items():
         for key,old in values.items():
             for i in range(a,b):
+                contact=next((c for c in t.get('body_contacts',[]) if c.get('body_name')==name),None)
+                from .support_quality import preserve_contact
+                if contact is not None and not preserve_contact(contact,i):continue
                 new=new_cache['frames']['body_errors'][name][key][i]
                 # All inferred contacts keep existing treatment; trusted supports
                 # also get independent final gates. Let existing errors improve.
@@ -122,6 +148,9 @@ def guard(robot,t,before,after,original,old_m,new_m,old_q,new_q,old_cache,new_ca
     before_j=set((old_q.get('temporal_quality') or {}).get('violating_frames',[]))
     after_j=set((new_q.get('temporal_quality') or {}).get('violating_frames',[]))
     if after_j-before_j:return 'new_jitter_frames'
+    from .temporal_constraints import regressions
+    added_joints=regressions(old_q.get('temporal_quality') or {},new_q.get('temporal_quality') or {})
+    if added_joints:return 'new_jitter_joint:'+sorted(added_joints)[0]
     return quality_guard(old_q,new_q,True)
 
 
@@ -133,7 +162,12 @@ def improved(stage,side,a,b,old,new,old_m,new_m):
             or new_m.get('owned_collision_deficit',float('inf'))<old_m.get('owned_collision_deficit',0.)-1e-7)
     if stage=='torso':return np.sum(np.maximum(new_m['torso'][a:b]-20.,0.))<np.sum(np.maximum(old_m['torso'][a:b]-20.,0.))-.01
     if stage=='arms':return score(new_m['errors'][side])<score(old_m['errors'][side])-1e-5
-    if stage=='jitter':return len(new['temporal_quality']['violating_frames'])<len(old['temporal_quality']['violating_frames'])
+    if stage=='jitter':
+        before=old['temporal_quality'];after=new['temporal_quality']
+        target_before=before.get('joints',{}).get(side,{}).get('violating_frames',[])
+        target_after=after.get('joints',{}).get(side,{}).get('violating_frames',[])
+        return (len(after['violating_frames'])<len(before['violating_frames']) or
+                (len(target_after)<len(target_before) and len(after['violating_frames'])<=len(before['violating_frames'])))
     if stage=='body' and len(new['body_support']['violating_frames'])<len(old['body_support']['violating_frames']):return True
     if stage=='dense_floor':return new['interpolated_floor']['samples_below_minus_1mm']<old['interpolated_floor']['samples_below_minus_1mm'] or new['interpolated_floor']['minimum_body_visual_cm']>old['interpolated_floor']['minimum_body_visual_cm']+1e-5
     return (np.maximum(new_m['contact'][a:b]-.001,0.).sum()<np.maximum(old_m['contact'][a:b]-.001,0.).sum()-1e-7
@@ -143,6 +177,23 @@ def improved(stage,side,a,b,old,new,old_m,new_m):
 def propose(robot,t,out,original,weights,model,job,recipe,deadline,progress=None,unfixed_waist=None):
     a,b=job['start'],job['end'];stage=job['module'];side=job['side'];n=len(out)
     local=window_targets(t,a,b,n);cfg=dict(weights,_repair_deadline=deadline,_pelvis_height_only=True);candidate=out.copy();detail={}
+    progress={} if progress is None else progress
+    if recipe.startswith('hand_leg'):
+        from .hand_leg_repair import propose as joint_proposal
+        return joint_proposal(model,t,out,original,cfg,job,recipe,deadline,progress)
+    if stage in ('support','dense_floor','leg_collision'):
+        from .adaptive_refine import MinimumChangeObjective
+        digits=''.join(c for c in recipe if c.isdigit())
+        tier=float(digits) if digits else (10. if recipe.endswith('more') else 5.)
+        cfg.update(_restore_geometry=True,_safety_joint_deg=tier,_safety_reference=original,_local_fit_progress=progress)
+        ids=np.asarray([2]+sum([g['leg'] for g in robot.sides.values()],[]))
+        from .local_geometry import project_root_height
+        vertical=project_root_height(robot,t,out,a,b)
+        seed=vertical[0] if vertical is not None else None
+        candidate,detail=fit_window(robot,t,out,cfg,a,b,24,ids_override=ids,seed=seed,
+            local_checks=True,allow_support=True,objective_factory=lambda i:MinimumChangeObjective(out[i]))
+        detail.update(policy='shared_native_swept_support_geometry_v1',tier_deg=tier)
+        return candidate,detail
     progress={} if progress is None else progress
     cfg['_branch_progress']=progress.setdefault('branches',{})
     cfg['_support_progress']=progress.setdefault('support',{})
@@ -171,27 +222,6 @@ def propose(robot,t,out,original,weights,model,job,recipe,deadline,progress=None
             from .shoulder_recovery import propose as recover
             candidate,detail=recover(model,t,out,cfg,a,b,options,deadline)
         detail.update(tier_deg=tier,**{k:options[k] for k in ('freeze_start','freeze_end')})
-    elif stage=='leg_collision' or (stage=='support' and recipe.startswith('geometry')):
-        if stage=='support':
-            model=movable_submodel(model,sum([g['leg'] for g in robot.sides.values()],[]))
-        cfg['leg_direction']=max(float(cfg['leg_direction']),float(cfg['arm_direction']),2.*float(cfg.get('foot_orientation',0.)))
-        ids=[2]+sum([g['leg'] for g in robot.sides.values()],[])
-        from .leg_policy import plan
-        joint_prior,preference_report=plan(model,t,out,a,b,ids)
-        options=dict(_joint_prior=joint_prior,coupled=True,_moving_ids=ids,_reference=original,_progress=progress,
-            _passive_collision_indices=collision_groups(model)['collision'],_geometry_reference=out,
-            body_joint_deg=float(''.join(c for c in recipe if c.isdigit())),_elastic_recovery=recipe.endswith('_elastic'),joint_deg=0.,root_position_m=float('inf'),whole_arm=True,
-            gesture_caps_active=False,iterations=24,
-            # Dense foot constraints need more QP iterations; the existing
-            # wall-time slice and saved trajectory still bound and resume work.
-            qp_iterations=80000 if recipe.endswith('_elastic') else 20000,
-            watchdog_seconds=max(.01,deadline-time.monotonic()),
-            **collision_seams(model,t,out,a,b))
-        candidate,detail=_repair_window(model,t,out,cfg,a,b,list(robot.sides),options)
-        from .leg_similarity import errors
-        detail['joint_preferences']=preference_report
-        detail['pelvis_height_change_max_m']=float(np.max(abs(candidate[a:b,2]-out[a:b,2])))
-        detail['source_leg_shape_deg']={label:dict(mean=float(v.mean()),p95=float(np.percentile(v,95)),maximum=float(v.max())) for label,v in [('before',errors(robot,t,out,a,b)),('after',errors(robot,t,candidate,a,b))]}
     elif stage=='arms':
         if recipe=='fit':
             from .experimental_arm_refine import refine
@@ -244,18 +274,18 @@ def propose(robot,t,out,original,weights,model,job,recipe,deadline,progress=None
                     detail['collision_tiers'].append(dict(degrees=tier,detail=recovery))
                 # The provisional torso pose was never written. Only the whole
                 # transaction can pass the external guard.
-    elif stage=='dense_floor':
-        from .dense_floor_refine import refine
-        candidate,detail=refine(robot,t,out,cfg,a,b,deadline)
     elif stage=='jitter':
+        from .adaptive_refine import MinimumChangeObjective
         cfg['joint_acceleration']=float(cfg.get('joint_acceleration',.18))*(2 if recipe=='temporal' else 4)
+        cfg['_temporal_repair_gain']=2. if recipe=='temporal' else 4.
         if side not in robot.names:raise ValueError('Jitter task requires its measured joint')
         j=3+robot.names.index(side)
         # Correct the measured body region; leg/waist jitter cannot be routed
         # into a shoulder-only solver. Supports remain hard local constraints.
         ids=next((np.asarray(g[k]) for g in robot.sides.values() for k in ('leg','arm') if j in g[k]),np.array([j]))
+        if any(j in g['leg'] for g in robot.sides.values()):ids=np.asarray([2]+sum([g['leg'] for g in robot.sides.values()],[]))
         candidate,detail=fit_window(robot,t,out,cfg,a,b,6 if recipe=='temporal' else 12,ids_override=ids,
-            local_checks=True,allow_support=True,objective_factory=lambda i:TimedObjective(Objective(robot,t,i,cfg),deadline))
+            local_checks=True,allow_support=True,objective_factory=lambda i:TimedObjective(MinimumChangeObjective(out[i]),deadline))
     else:
         cfg['max_iterations']=30 if recipe=='solve' else 60
         cfg['_repair_trusted_support']=stage=='body'
@@ -266,7 +296,7 @@ def propose(robot,t,out,original,weights,model,job,recipe,deadline,progress=None
     return candidate,detail
 
 
-def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,continue_from=None,resume_recheck=False):
+def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,continue_from=None,resume_recheck=False,repair_modules=None):
     from .acceptance import evaluate
     from .cli import atomic_json,sha
     from .resource_events import phase
@@ -318,21 +348,33 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         return current['torso'] if torso_reference is None else current['torso']-np.maximum(0.,np.asarray(torso_reference)+.02-20.)
     def jobs():
         pending=jobs_from_masks(masks(quality,cache,robot,groups,torso_reference),len(out),POLICY['core_frames'],POLICY['padding_frames'])
+        if repair_modules is not None:
+            pending=[job for job in pending if job['module'] in repair_modules]
         for job in pending:
+            if job['module']=='support':
+                # Existing coupled geometry kernel handles support and collision
+                # together; avoid a support-only proposal that immediately
+                # fails the common geometry guard. No new candidate family.
+                job['candidate_order']=['geometry5_elastic','geometry10_elastic']
             if job['module']=='arms':
                 errors=current['errors'][job['side']];a,b=job['core_start'],job['core_end']
                 # Large direction errors deserve a branch trial before repeated
                 # small local steps. This orders search; it changes no gate.
                 if max(np.percentile(errors[k][a:b],95) for k in ('upper','lower'))>2*policy()['arm_direction_deg']:
                     job['candidate_order']=['current_best','guided_current','original_frax','guided_original','fit']
+        from .hand_leg_repair import attach
+        pending=attach(pending,cache['full_collision']['samples'],model)
         return queue.configure(pending,out)
     def eligible(pending):
+        from .refine_routing import ready_jobs
         cm=collision_masks(cache['full_collision']['samples'],groups,len(out))
-        return dependencies(queue.actionable(pending),dependency_torso(),cm['collision'],cm.get('body_collision'),pending=pending)
+        return ready_jobs(queue,pending,dependency_torso(),cm['collision'],cm.get('body_collision'),attempts)
     def pending_report():
         pending=jobs();_,blocked=eligible(pending)
         cm=collision_masks(cache['full_collision']['samples'],groups,len(out))
-        _,local_blocked=dependencies([j for j in pending if j['module']!='torso'],dependency_torso(),cm['collision'],cm.get('body_collision'),pending=pending)
+        from .refine_routing import SAFETY_ORDER
+        pose_jobs=[j for j in pending if j['module']!='torso' and j['module'] not in SAFETY_ORDER]
+        _,local_blocked=dependencies(pose_jobs,dependency_torso(),cm['collision'],cm.get('body_collision'),pending=pending)
         block={queue.key(j):j['reason'] for j in blocked+local_blocked}
         return [dict(j,dependency=block.get(queue.key(j))) for j in queue.pending(pending)]
     def checkpoint(status):
@@ -350,7 +392,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
             recipe=queue.recipe(job);entry=dict(job,recipe=recipe,status='rejected');begin=time.monotonic()
             try:
                 local_deadline=min(deadline,time.monotonic()+POLICY['candidate_seconds'])
-                local_model=models.get(job['module'],models.get('collision',model)) if job['module'] in ('collision','leg_collision','torso') else model
+                local_model=model if recipe.startswith('hand_leg') else models.get(job['module'],models.get('collision',model)) if job['module'] in ('collision','leg_collision','torso') else model
                 candidate,detail=propose(robot,t,out,reference,weights,local_model,job,recipe,local_deadline,queue.progress(job),unfixed_waist)
                 aligned=detail.pop('_aligned_reference',None) if isinstance(detail,dict) else None
                 entry['detail']=detail
@@ -361,7 +403,8 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 trial_cache=fork(cache)
                 proposed=evaluate(trial,description,solve,'frax',cache=trial_cache,changed=(job['start'],job['end']))
                 newer=measurements(trial_cache,robot)
-                reason=guard(robot,t,out,candidate,reference,current,newer,quality,proposed,cache,trial_cache,model,job)
+                checked_job=dict(job,hand_leg_route=detail['route']) if recipe.startswith('hand_leg') else job
+                reason=guard(robot,t,out,candidate,reference,current,newer,quality,proposed,cache,trial_cache,model,checked_job)
                 if 'leg_shape_tradeoff' in newer:entry['leg_shape_tradeoff']=newer['leg_shape_tradeoff']
                 if reason is None and not improved(job['module'],job['side'],job['start'],job['end'],quality,proposed,current,newer):reason='no_target_metric_improvement'
                 if reason is None:
@@ -397,6 +440,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
     if status=='search_exhausted_review' and any(v['reason']=='time_sliced_candidates' for v in queue.pending(jobs())):status='time_slice_review'
     checkpoint(status)
     report=dict(policy=POLICY,status=status,attempts=attempts,kept_candidates=kept,before=before,after=quality,
+        repair_modules=None if repair_modules is None else sorted(repair_modules),
         pending=pending_report(),collision_groups={k:len(v) for k,v in groups.items()},baseline_sha256=baseline_sha,final_sha256=sha(path),
         elapsed_s=time.monotonic()-started,target_calibration='full_sequence_once_then_slice',full_v8_restarted=False,
         final_fresh_audit_equal=True,similarity_mode='soft',budget_scope='optional whole repair wall time; finite candidate time slices, no clip window-count cap')

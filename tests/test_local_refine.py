@@ -141,3 +141,20 @@ def test_unchanged_motor_valid_input_is_not_rejected_by_numeric_step_cap(scene,m
     np.testing.assert_array_equal(out[:3],x[:3]);np.testing.assert_array_equal(out[8:],x[8:])
     assert np.max(abs(np.diff(out[:,j])))<=physical+2e-6
     assert np.max(abs(np.diff(out[2:9,j])))<=numeric+2e-6
+
+
+def test_local_numerical_checkpoint_survives_deadline_without_changing_output(scene,monkeypatch):
+    import time
+    robot,t,x,cfg=scene;j=robot.sides['Left']['arm'][0];before=x.copy();state={}
+    class Objective:
+        def __init__(self,robot,t,i,cfg):self.i=i
+        def evaluate(self,q):
+            goal=before[self.i].copy();goal[j]=.02
+            return q-goal,np.eye(32)
+    monkeypatch.setattr(local,'Objective',Objective);monkeypatch.setattr(local,'_floor',lambda *args:0.)
+    cfg=dict(cfg,_local_fit_progress=state,_repair_deadline=time.monotonic()-1.)
+    with pytest.raises(TimeoutError,match='local_geometry_deadline'):local.fit_window(robot,t,x,cfg,1,10,ids_override=[j])
+    np.testing.assert_array_equal(x,before);assert state['sqp']['iteration']==0
+    cfg['_repair_deadline']=float('inf');out,report=local.fit_window(robot,t,x,cfg,1,10,ids_override=[j])
+    assert out[5,j]>0 and report['resumed_from_iteration']==0
+    assert state['sqp']['iteration']>0

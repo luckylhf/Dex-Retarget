@@ -44,6 +44,40 @@ def test_cached_audit_equals_fresh_including_boundary_intervals(tmp_path,bounds)
     audit(p,cache=trial,changed=bounds);assert not trial['work']['cache_hit']
 
 
+def test_relocated_audit_uses_verified_runtime_assets(tmp_path):
+    from dex_frax.cli import sha
+    from dex_frax.paths import asset_fingerprints
+    from dex_frax.v8.audit import audit
+
+    path, payload, meta, _ = export_neutral(tmp_path, n=5)
+    original = audit(path, write=False)
+    meta['model_sha256'] = sha(meta['model'])
+    meta['model'] = str(tmp_path / 'previous-host/dex_29.xml')
+    path.with_suffix('.json').write_text(json.dumps(meta))
+    assets = asset_fingerprints()
+    assets['.DS_Store'] = 'legacy-finder-metadata'
+    identity = tmp_path / 'identity.json'
+    identity.write_text(json.dumps(dict(assets=assets)))
+    assert audit(path, write=False) == original
+    assets['model.json'] = 'different-asset'
+    identity.write_text(json.dumps(dict(assets=assets)))
+    with pytest.raises(ValueError, match='asset hashes differ'):
+        audit(path, write=False)
+
+
+def test_asset_identity_excludes_metadata_but_tracks_model_changes(tmp_path):
+    from dex_frax.paths import asset_fingerprints
+
+    xml = tmp_path / 'dex.xml'
+    xml.write_text('<mujoco/>')
+    original = asset_fingerprints(tmp_path)
+    for name in ('.DS_Store', '._dex.xml', 'README.md', 'LICENSE'):
+        (tmp_path / name).write_text('metadata')
+    assert asset_fingerprints(tmp_path) == original
+    xml.write_text('<mujoco model="changed"/>')
+    assert asset_fingerprints(tmp_path) != original
+
+
 def test_final_gate_reads_support_jitter_full_collision_and_separates_history(tmp_path,monkeypatch):
     from types import SimpleNamespace
     from dex_frax import acceptance

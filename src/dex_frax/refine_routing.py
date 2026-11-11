@@ -28,9 +28,10 @@ def collision_groups(model):
 def submodel(model,indices):
     """Solver sees only its movable collision class; adoption still checks all."""
     import mink
+    from .ankle_collision import AnkleCollisionAvoidanceLimit
     result=copy.copy(model)
     pairs=model.pairs[np.asarray(indices,int)]
-    result.limit=mink.CollisionAvoidanceLimit(result.m,[([int(a)],[int(b)]) for a,b in pairs],
+    result.limit=AnkleCollisionAvoidanceLimit(result.m,[([int(a)],[int(b)]) for a,b in pairs],
         minimum_distance_from_collisions=result.cfg['margin_m'],collision_detection_distance=result.cfg['detection_m'])
     result.pairs=np.asarray(result.limit.geom_id_pairs,int)
     result.names=[[result.m.geom(a).name,result.m.geom(b).name] for a,b in result.pairs]
@@ -94,3 +95,21 @@ def movable_submodel(model,columns):
     indices=[k for k,(a,b) in enumerate(model.pairs)
              if int(model.m.geom_bodyid[a]) in bodies or int(model.m.geom_bodyid[b]) in bodies]
     return submodel(model,indices)
+
+
+SAFETY_ORDER={'leg_collision':0,'support':1,'dense_floor':2,'jitter':3,'body':4,'collision':5}
+
+
+def ready_jobs(queue,pending,torso,arm_collision,body_collision,attempts):
+    """Shared safety fits protect each other physically, without queue deadlocks.
+
+    Identical selection is used by normal refinement and safety-scoped runs.
+    Existing dependencies continue to protect pose-only work after safety.
+    """
+    actionable=queue.actionable(pending)
+    safety=[job for job in actionable if job['module'] in SAFETY_ORDER]
+    if safety:
+        visits={name:sum(entry['module']==name for entry in attempts) for name in SAFETY_ORDER}
+        chosen=min({job['module'] for job in safety},key=lambda name:(visits[name],SAFETY_ORDER[name]))
+        return [job for job in safety if job['module']==chosen],[]
+    return dependencies(actionable,torso,arm_collision,body_collision,pending=pending)

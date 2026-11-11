@@ -22,6 +22,7 @@ DEFAULTS = dict(enabled=True, margin_m=.0035, detection_m=.08,
 class CollisionModel:
     def __init__(self, robot, config=None):
         import mink
+        from ..ankle_collision import AnkleCollisionAvoidanceLimit
         self.r = robot
         self.cfg = dict(DEFAULTS, **(config or {}))
         if not (0 <= self.cfg['penetration_tolerance_m'] < self.cfg['margin_m'] < self.cfg['detection_m']):
@@ -68,10 +69,10 @@ class CollisionModel:
             from ..foot_collision import groups as foot_groups
             extra,foot_ids=foot_groups(m,self.foot_coverage,ids);groups+=extra
             ids=np.unique(np.r_[ids,foot_ids])
-            self.scope='full_body_with_full_feet_and_external_same_leg_foot_shin'
+            self.scope='full_body_with_full_feet_and_conditional_same_leg_foot_shin'
         m.geom_contype[ids] = 1
         m.geom_conaffinity[ids] = 1
-        self.limit = mink.CollisionAvoidanceLimit(m, groups,
+        self.limit = AnkleCollisionAvoidanceLimit(m, groups,
             minimum_distance_from_collisions=self.cfg['margin_m'],
             collision_detection_distance=self.cfg['detection_m'])
         self.pairs = np.array(self.limit.geom_id_pairs, dtype=int)
@@ -92,6 +93,9 @@ class CollisionModel:
         bounded = (m.geom_rbound[a] > 0) & (m.geom_rbound[b] > 0)
         near = (~bounded) | (np.linalg.norm(data.geom_xpos[a]-data.geom_xpos[b], axis=1)
                             - m.geom_rbound[a]-m.geom_rbound[b] < limit)
+        # Declared exclusions are classification rules, not positive measured
+        # clearances. Detection-distance sentinels keep pair indexing stable.
+        near &= ~self.limit.excluded_pairs(self.configuration)
         d = np.full(len(a), limit)
         for k in np.flatnonzero(near):
             d[k] = mujoco.mj_geomDistance(m, data, int(a[k]), int(b[k]), limit, None)
@@ -117,7 +121,8 @@ def scan(model, xs, rotations, subdivisions=None, cache=None, changed=None):
         raise ValueError('interpolation_steps must be a positive integer')
     tol = model.cfg['penetration_tolerance_m']
     cache={} if cache is None else cache
-    key=(steps,tuple(map(tuple,model.pairs.tolist())),tuple(sorted((k,str(v)) for k,v in model.cfg.items())))
+    conditional_exclusions=model.limit.ankle_rule.describe()
+    key=(steps,tuple(map(tuple,model.pairs.tolist())),tuple(sorted((k,str(v)) for k,v in model.cfg.items())),str(conditional_exclusions))
     valid=False
     if changed is not None and cache.get('key')==key and cache.get('xs',np.empty(0)).shape==xs.shape:
         a,b=changed
@@ -154,7 +159,8 @@ def scan(model, xs, rotations, subdivisions=None, cache=None, changed=None):
                   collision_samples=len(events), minimum_distance_m=minimum,
                   worst=worst, interpolation_steps=steps,
                   scope=getattr(model,'scope','declared_upper_body')+'; convex geometry, adjacent/welded bodies excluded; sampled, not continuous certification',
-                  structural_exclusions=getattr(model,'exclusions',[]),foot_coverage=getattr(model,'foot_coverage',None))
+                  structural_exclusions=getattr(model,'exclusions',[]),foot_coverage=getattr(model,'foot_coverage',None),
+                  conditional_exclusions=conditional_exclusions)
     return report, events, impacted
 
 
@@ -267,7 +273,8 @@ def _repair_window(model, t, xs, solver_cfg, a, b, sides, options=None):
             if coupled:
                 for contact in t.get('body_contacts',[]):
                     mode=int(contact['mode'][i])
-                    if not mode:continue
+                    from ..support_quality import preserve_contact
+                    if not mode or not preserve_contact(contact,i):continue
                     body=contact['body'];hull=np.asarray(contact.get('robot_hull',r.surface_models[body]['hull']))
                     local=hull[np.argmin(hull@r.rot(body)[2])].copy()
                     contacts.append((body,hull,local,r.point(body,local),mode))
@@ -383,7 +390,10 @@ def _repair_window(model, t, xs, solver_cfg, a, b, sides, options=None):
                 direction=r.rot(body)[:,axis];dot=float(rot0[:,axis]@direction)
                 derivative=rot0[:,axis]@(-skew(direction)@A[:,ids])
                 C.append(-derivative);upper.append(dot-np.cos(np.deg2rad(options['hand_rotation_deg'])))
-        tolerance=.0005
+        # Immutable joins may already satisfy export's 1 mm support gate while
+        # missing the optimizer's 0.5 mm interior target. Do not declare such a
+        # fixed, already-valid row infeasible. Moving poses retain the target.
+        tolerance=.001 if frozen[j].all() else .0005
         # A small interior target leaves room for nonlinear contact curvature;
         # the original measured support tolerance remains unchanged.
         linear_tolerance=tolerance*.9 if coupled and options.get('_elastic_recovery') and not frozen[j].all() else tolerance
@@ -569,7 +579,8 @@ def _repair_window(model, t, xs, solver_cfg, a, b, sides, options=None):
             trial=q+alpha*delta;new=metrics(trial)
             palm_progress=max(2e-6,old[3]-1e-7) if source_palms is not None else 2e-6
             restoring_palm=source_palms is not None and old[3]>2e-6 and new[3]<old[3]-1e-7
-            if (new[0]<old[0]+1e-9 or restoring_palm) and (not options or (new[3]<=palm_progress and new[4]<2e-6)):
+            support_progress=max(2e-6,old[4]-1e-7) if coupled and elastic else 2e-6
+            if (new[0]<old[0]+1e-9 or restoring_palm) and (not options or (new[3]<=palm_progress and new[4]<=support_progress)):
                 q=trial;accepted=True;break
         if accepted and scratch is not None:
             seed=xs[a:b].copy();seed[:,ids]=q;scratch['candidate_window']=seed

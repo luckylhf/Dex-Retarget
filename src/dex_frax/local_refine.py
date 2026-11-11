@@ -1,4 +1,4 @@
-"""Selective offline pose fitting with fixed root/legs and window boundaries.
+"""Constrained window fitting with task-selected joints and checked seams.
 
 Only difficult upper-body windows enter the sparse pose/velocity solve. The
 initial frax trajectory stays the reference elsewhere; there is no full-clip
@@ -53,8 +53,9 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
     ids = upper_ids(robot) if ids_override is None else np.asarray(ids_override)
     # Inferred active upper-body support requires a contact-aware whole-body
     # solve. Keep this fast path conservative and leave the final gate active.
-    roots = set(robot.m.jnt_bodyid[robot.jids[ids-3]].tolist())
+    roots = set(robot.m.jnt_bodyid[robot.jids[ids[ids>=3]-3]].tolist())
     def moves(body):
+        if np.any(ids<3):return True
         while body:
             if body in roots:
                 return True
@@ -72,18 +73,43 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
     objectives = [Objective(robot, t, i, cfg) if objective_factory is None else objective_factory(i) for i in range(a, b)]
     f = t['fps'] / 60.
     D1 = kron(diags([-np.ones(n-1), np.ones(n-1)], [0, 1], shape=(n-1, n)), eye(d), format='csc')
-    D2 = kron(diags([np.ones(n-2), -2*np.ones(n-2), np.ones(n-2)], [0, 1, 2], shape=(n-2, n)), eye(d), format='csc') * (6. * f*f)
+    D2 = kron(diags([np.ones(n-2), -2*np.ones(n-2), np.ones(n-2)], [0, 1, 2], shape=(n-2, n)), eye(d), format='csc') * (6. * f*f*float(cfg.get('_temporal_repair_gain',1.)))
     temporal = vstack([D1 * (.18*f), D2], format='csc')
-    step = robot.joint_step(t['fps'], cfg)[ids-3]
+    step = np.r_[np.full(3,np.inf),robot.joint_step(t['fps'], cfg)][ids]
     velocity = diags(np.tile(1./step, n-1)) @ D1
     A = vstack([eye(n*d), velocity], format='csc')
     lo = np.broadcast_to(robot.lower[ids]+1e-7, q.shape).copy()
     hi = np.broadcast_to(robot.upper[ids]-1e-7, q.shape).copy()
+    if 'repair_lower_bounds' in t:lo=np.maximum(lo,np.asarray(t['repair_lower_bounds'])[a:b,ids])
+    for g in robot.sides.values():
+        matches=np.flatnonzero(ids==g['leg'][3])
+        if len(matches):
+            k=int(matches[0]);lo[:,k]=np.maximum(lo[:,k],np.where(xs[a:b,g['leg'][3]]>=0.,0.,-np.inf))
     # Two immutable samples at either end preserve both joins and their
     # outside second differences. Clip endpoints follow the same convention.
-    if a > 0: lo[:2] = hi[:2] = xs[a:a+2,ids]
-    if b < len(xs): lo[-2:] = hi[-2:] = xs[b-2:b,ids]
-    physical_step=robot.speed_limits[ids-3]/t['fps']
+    fixed_frames=[]
+    restore=bool(cfg.get('_restore_geometry',False))
+    if restore:
+        from .adaptive_refine import inspect,window_targets
+        boundary=inspect(robot,window_targets(t,a,b,len(xs)),xs[a:b])
+        passing=(boundary['contact']<=.001)&(boundary['floor']>=-.001)
+        from .v8.self_collision import CollisionModel
+        check=CollisionModel(robot,{'coverage':'full'})
+        for j in set([0,1,n-2,n-1]):
+            check.update(xs[a+j],t['root_r'][a+j]);passing[j]&=check.distances().min()>=-check.cfg['penetration_tolerance_m']
+    else:passing=np.ones(n,bool)
+    if a>0:fixed_frames.extend(j for j in (0,1) if passing[j])
+    if b<len(xs):fixed_frames.extend(j for j in (n-2,n-1) if passing[j])
+    if fixed_frames:lo[fixed_frames]=hi[fixed_frames]=xs[a:b,ids][fixed_frames]
+    if cfg.get('_safety_joint_deg'):
+        cap=np.where(ids<3,np.inf,np.deg2rad(cfg['_safety_joint_deg']))
+        reference=np.asarray(cfg.get('_safety_reference',xs))[a:b,ids]
+        lo=np.maximum(lo,reference-cap);hi=np.minimum(hi,reference+cap)
+    physical_step=np.r_[np.full(3,np.inf),robot.speed_limits/t['fps']][ids]
+    for j,neighbor in ((0,a-1),(n-1,b)):
+        if 0<=neighbor<len(xs):
+            lo[j]=np.maximum(lo[j],xs[neighbor,ids]-physical_step)
+            hi[j]=np.minimum(hi[j],xs[neighbor,ids]+physical_step)
     velocity_tolerance=1e-4/t['fps']
     speed_bounds=np.ones((n-1,d))
     # Numerical step caps stabilize new solves; they are not motor limits.
@@ -91,12 +117,17 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
     # arm fitter that legitimately exceed the numerical cap. Movable rows
     # retain that cap, and actual motor violations are never exempted.
     for edge,enabled in ((0,a>0),(-1,b<len(xs))):
-        if enabled:
+        if enabled and ((edge==0 and {0,1}.issubset(fixed_frames)) or (edge==-1 and {n-2,n-1}.issubset(fixed_frames))):
             actual=abs(np.diff(xs[a:b,ids],axis=0))[edge]
             rounding=(actual>step)&(actual<=physical_step+velocity_tolerance)
             speed_bounds[edge,rounding]=actual[rounding]/step[rounding]
     low = np.r_[lo.ravel(), -speed_bounds.ravel()]
     high = np.r_[hi.ravel(), speed_bounds.ravel()]
+    temporal_corridor=None
+    if cfg.get('_temporal_repair_gain',0.):
+        from .temporal_constraints import corridor
+        bands,bounds,temporal_corridor=corridor(robot,t,xs,a,b,ids)
+        A=vstack([A,bands],format='csc');low=np.r_[low,-bounds];high=np.r_[high,bounds]
 
     def evaluate(z, jacobian=False):
         qs = z.reshape(n, d)
@@ -113,13 +144,12 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
     geometry=None
     if allow_support:
         from .local_geometry import Geometry
-        geometry=Geometry(robot,t,xs,a,b,ids,moves)
-    if geometry and geometry.evaluate(q.ravel())>1e-8:
+        geometry=Geometry(robot,t,xs,a,b,ids,moves,restore=restore,fixed_frames=fixed_frames)
+    if geometry and not restore and geometry.evaluate(q.ravel())>1e-8:
         # Start from the feasible boundary reference when a branch proposal
         # violates floor/support; hard constraints cannot certify that seed.
         q=xs[a:b,ids].copy()
-    if a>0:q[:2]=xs[a:a+2,ids]
-    if b<len(xs):q[-2:]=xs[b-2:b,ids]
+    if fixed_frames:q[fixed_frames]=xs[a:b,ids][fixed_frames]
     z = q.ravel()
     seed_projection = None
     if seed is not None:
@@ -130,9 +160,19 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
         if np.any(at < low-1e-8) or np.any(at > high+1e-8):
             z, seed_projection = _qp(eye(z.size,format='csc'),-z,A,low,high,
                 xs[a:b,ids].ravel(),scaling=10)
+    if np.any(low>high+1e-10):raise ValueError('local_joint_corridor_empty; expand fixed-reference tier or context')
+    progress=cfg.get('_local_fit_progress');saved=(progress or {}).get('sqp',{});start_iteration=0
+    if saved.get('shape')==[n,d] and saved.get('ids')==ids.tolist():
+        resumed=np.asarray(saved['q'],float)
+        if resumed.shape==(n,d) and np.isfinite(resumed).all():z=resumed.ravel();start_iteration=int(saved.get('iteration',0))
+    def save_iteration(k):
+        if progress is not None:progress['sqp']=dict(shape=[n,d],ids=ids.tolist(),q=z.reshape(n,d).tolist(),iteration=k)
     initial = evaluate(z); cost0 = cost = float(initial @ initial)+(geometry.evaluate(z) if geometry else 0.)
-    accepted = 0
-    for _ in range(iterations):
+    accepted = 0;qp_reports=[]
+    already_clear=bool(restore and geometry and geometry.last.get('safety_goal_met',False))
+    for iteration in range(start_iteration,start_iteration if already_clear else iterations):
+        save_iteration(iteration)
+        if cfg.get('_repair_deadline') is not None and time.monotonic()>=cfg['_repair_deadline']:raise TimeoutError('local_geometry_deadline')
         res, J = evaluate(z, True)
         at = A @ z; dl, du = low-at, high-at
         dl[:z.size] = np.maximum(dl[:z.size], -.3)
@@ -141,24 +181,37 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
         if geometry:
             G,gl,gh=geometry.evaluate(z,linear=True)
             constraints=vstack([A,G],format='csc');dl=np.r_[dl,gl];du=np.r_[du,gh]
-        delta, _ = _qp(J.T @ J + eye(z.size, format='csc')*.01,
-                       J.T @ res, constraints, dl, du, np.zeros(z.size), scaling=10)
+        H=J.T@J+eye(z.size,format='csc')*.01;gradient=J.T@res
+        objective_scale=max(1.,float(abs(H.diagonal()).max()))
+        delta, qp_report = _qp(H/objective_scale,
+                       gradient/objective_scale, constraints, dl, du, np.zeros(z.size), scaling=10,
+                       require_optimal=not (restore or bool(cfg.get('_temporal_repair_gain',0.))),
+                       feasible_tolerance=1e-6 if restore else 1e-7)
+        qp_report['objective_scale']=objective_scale
+        qp_reports.append(qp_report)
         moved = False
-        for alpha in (1., .5, .25, .125):
+        for alpha in (1., .5, .25, .125, .0625, .03125, .015625):
             candidate = z + alpha*delta
-            r = evaluate(candidate); new_cost = float(r @ r)+(geometry.evaluate(candidate) if geometry else 0.)
-            if new_cost < cost-1e-7:
+            r = evaluate(candidate); geometric_cost=geometry.evaluate(candidate) if geometry else 0.
+            if geometry and cfg.get('_temporal_repair_gain',0.) and not restore and geometric_cost>1e-6:continue
+            new_cost = float(r @ r)+geometric_cost
+            old_linear=max(float(np.max(low-A@z)),float(np.max(A@z-high)),0.)
+            new_linear=max(float(np.max(low-A@candidate)),float(np.max(A@candidate-high)),0.)
+            restoring=(bool(cfg.get('_temporal_repair_gain',0.)) and old_linear>1e-7 and new_linear<old_linear-1e-8)
+            if new_cost < cost-1e-7 or restoring:
                 improvement = cost-new_cost
                 z, cost = candidate, new_cost
                 accepted += 1; moved = True
                 break
-        if not moved or improvement < 1e-5*max(1., cost):
+        save_iteration(iteration+1)
+        if restore and moved and geometry.last.get('safety_goal_met',False):break
+        linear_feasible=(not cfg.get('_temporal_repair_gain',0.) or (np.all(A@z>=low-1e-7) and np.all(A@z<=high+1e-7)))
+        if not moved or (linear_feasible and improvement < 1e-5*max(1., cost)):
             break
     out = xs.copy()
     out[a:b, ids] = z.reshape(n, d)
     # Equality solver tolerance must never modify the fixed boundary samples.
-    if a > 0: out[a:a+2] = xs[a:a+2]
-    if b < len(xs): out[b-2:b] = xs[b-2:b]
+    if fixed_frames:out[np.asarray(fixed_frames)+a]=xs[np.asarray(fixed_frames)+a]
     checked=out[max(0,a-1):min(len(out),b+1),ids] if local_checks else out[:,ids]
     joint_tolerance=np.deg2rad(json.loads(Path(__file__).with_name('quality_pose.json').read_text())['joint_limit_tolerance_deg'])
     if (np.max(abs(np.diff(checked, axis=0)) - physical_step) > velocity_tolerance or
@@ -174,14 +227,18 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
             body=c['body'];hull=np.asarray(c['robot_hull'])
             for i in range(a,b):
                 mode=int(c['mode'][i])
-                if not mode:continue
+                from .support_quality import preserve_contact
+                if not mode or not preserve_contact(c,i):continue
                 robot.set(xs[i],t['root_r'][i]);local=hull[np.argmin(hull@robot.rot(body)[2])];before=robot.point(body,local).copy()
                 robot.set(out[i],t['root_r'][i])
                 if mode!=1:local=hull[np.argmin(hull@robot.rot(body)[2])]
                 delta=robot.point(body,local)-before
                 if np.max(abs(delta if mode==1 else delta[2:]))>.0005:raise ValueError('local_arm_support_changed')
     return out, dict(start=a, end=b, status='repaired', iterations=accepted,
-                     initial_cost=cost0, cost=cost, minimum_floor_m=new_floor,seed_projection=seed_projection)
+                     initial_cost=cost0, cost=cost, minimum_floor_m=new_floor,seed_projection=seed_projection,
+                     qp_diagnostics=qp_reports,temporal_corridor=temporal_corridor,
+                     classification='nonlinear_checked_progress' if accepted else 'no_feasible_descent',
+                     boundary_fixed_frames=sorted(fixed_frames),resumed_from_iteration=start_iteration,geometry=(geometry.last if geometry else None))
 
 
 def split_windows(ranges, maximum, overlap):

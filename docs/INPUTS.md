@@ -10,7 +10,9 @@ export DEX_FRAX_ASSETS=/absolute/path/to/assets/dex_evt
 
 目录需完整保留 `model.json`、`mjcf/`、`meshes/`、`meshes_visual/`、`meshes_convex/`、`urdf/`、`README.md` 和 `LICENSE`，并核对模型指纹。wheel 和 Python 源码分发包不含机器人资产，安装后须通过该变量指定外部副本。
 
-资产身份包含目录内所有文件，README 也参与校验。已有批次续跑或运行期间，应保持其资产副本的全部文件字节不变。资产目录内的 README 保留原始版本以兼容旧身份，当前项目用法以本节为准；本包不提供其中提到的 `scripts/import_assets.py`，外部资产通过上述变量指定。
+资产身份覆盖模型、网格等运行文件，运行与续跑期间须保持其字节一致。目录根部的 README、LICENSE、Finder 的 `.DS_Store` 和 AppleDouble 文件不参与计算。
+
+迁移动作后可用 `python -m dex_frax.v8.audit path/to/motion.pkl` 复核。保留对应的 `motion.json`、`motion.diagnostics.npz` 和 `identity.json`。原模型路径不可用时，复核使用 `DEX_FRAX_ASSETS` 指定的模型，核对导出记录的 XML 哈希和身份记录中的资产哈希。
 
 ## BVH
 
@@ -28,8 +30,6 @@ BVH 默认使用厘米及 `absolute` 位置通道，文件本身通常不声明�
 ```
 
 `--bvh-units` 支持 `cm`、`m`、`mm`；`absolute` 表示位置通道直接替代对应 OFFSET 分量，`offset` 表示通道值加 OFFSET。相同选项也适用于 `batch`，一个批次使用同一约定，不同约定应分批。参数写入转换身份与产物元数据，改变后不能沿用旧续跑身份。SMPL-X 仍使用自己的 `--units m`。
-
-mocap 的前臂横向参考使用零旋转骨架中完整父链累积后的指根位置差，再用于前臂局部参考；不再直接相减不同父系的末级 OFFSET，也不依赖截取片段的第一帧。
 
 推荐显式指定来源。`mocap` 不表示支持任意 BVH；新的关节命名、局部轴或骨架拓扑需要先适配。
 
@@ -79,7 +79,7 @@ body_models/
 
 ### 支持的内容和格式
 
-输入是**单个人体的一段连续动作**。局部旋转必须是轴角、单位弧度；平移必须是米。数组须有限、帧数一致，至少 3 帧；输出统一为 50 Hz。旋转在人体前向几何之前做局部 SLERP，平移与形状参数线性插值，保留原时间尺度。
+输入是**单个人体的一段连续动作**。局部旋转必须是轴角、单位弧度；平移必须是米。数组须有限、帧数一致，至少 3 帧；输出统一为 50 Hz。人体前向几何前，旋转按局部 SLERP 重采样，平移与形状参数线性插值。默认保持时间尺度；局部减速选项及对照方式见 [时间映射](PIPELINE.md#帧率与时间映射)。
 
 | 字段 | 形状与要求 |
 |---|---|
@@ -103,7 +103,7 @@ body_models/
 
 - `(T,66)`：根 3 + 身体 63。
 - `(T,165)`：根 3 + 身体 63 + 下颌 3 + 左眼 3 + 右眼 3 + 左手 45 + 右手 45。
-- 不接受 72 维 SMPL 或 156 维 SMPL-H 直接冒充 SMPL-X。分字段与合并字段同时存在时必须一致；别名冲突会报错。
+- 不接受 72 维 SMPL 或 156 维 SMPL-H 直接作为 SMPL-X 输入。分字段与合并字段同时存在时必须一致；别名冲突会报错。
 
 缺失手部姿态时，使用 SMPL-X 模型的放松手均值，并报告 `unobserved_hands_use_model_relaxed_mean`；这不代表视频识别出了手指。显式手部轴角按绝对局部旋转解释，不重复叠加模型手部均值。
 
@@ -140,15 +140,15 @@ body_models/
 
 `examples/inputs/smplx/gbtc/gbtc.pt` 是附带的一组 30 fps GVHMR 缓存，可直接替换上面示例中的 `.pt` 路径，运行方式见 [README](../README.md)。
 
-`check-input` 只检查内容结构；实际模型文件、人体几何和支撑证据充分性在 `convert` 时检查。`--max-frames` 仅用于短输入接口测试，不能作为全片质量验收。SMPL-X 同样提供 `--mode fast`（默认，完整 Frax 求解、导出和检查）与 `--mode refine`（追加问题窗口精修）；复用整片人体几何与标定，不自动重跑完整 V8。旧模式入口已移除。两种模式的 `--budget` 都限制总时间（包含人体准备）。精修另支持 `--repair-budget` 和 `--continue-from`，后者仍须提供相同输入和源参数。
+`check-input` 只检查内容结构；实际模型文件、人体几何和支撑证据充分性在 `convert` 时检查。`--max-frames` 仅用于短输入接口测试，不能作为全片质量验收。SMPL-X 同样支持 `--mode fast`（默认）和 `--mode refine`。两种模式的 `--budget` 都限制包含人体准备在内的总时间。精修另支持 `--repair-budget` 和检查点续跑，见 [流程说明](PIPELINE.md#检查点与续跑)。
 
-人体准备在 `--smplx-python` 的独立子进程中执行，不要求旧 GMR 环境安装 JAX。准备后的 `input/human.npz` 是内部几何缓存，不是可重新当作 SMPL-X 参数提交的公共输入格式。
+人体准备在 `--smplx-python` 指定的独立子进程中执行。准备后的 `input/human.npz` 是内部几何缓存，不是可重新当作 SMPL-X 参数提交的公共输入格式。
 
 ### 可选接地修正的含义
 
 `--grounding contact` 利用静止概率大于 0.8、且接近较低脚底的观测，拟合一条平滑的公共垂直漂移曲线；对所有人体点减去同一高度偏移，不改局部旋转和肢体长度。没有支撑观测的区间只延续/插值漂移，**不会每帧把最低脚压到地面**。缺少置信度或有效支撑证据不足时直接提示失败，不静默切换算法。
 
-这种修正假设平地，静止也不等于真实承重。长时间腾空、静态抬腿、台阶和平台可能使判断出错；应查看起跳/落地及长无观测区间。它没有自动证明所有跳跃均被正确保留。可靠动捕通常用 `off`。
+这种修正假设平地；静止概率不等于真实承重。长时间腾空、静态抬腿、台阶和平台可能影响结果，应复核起跳、落地及长时间无支撑观测的区间。已可靠接地的动捕使用 `off`。
 
 ## 附带示例
 
@@ -163,16 +163,43 @@ BVH 示例的文件来源和 SHA-256 见目录内 `manifest.json`；GBTC 的逐�
 
 ## 输出格式
 
-每个完成的求解阶段保存以下文件；默认统一模式生成 `frax/`；两阶段对照按需生成 `frax/`、`v8/` 子目录，固定模式直接写入指定目录。
+每条完成动作的输出结构为：
+
+```text
+outputs/motion/
+├── selection.json
+├── accepted.json
+└── frax/
+    ├── motion.pkl
+    ├── motion.npz
+    ├── quality.json
+    ├── identity.json
+    └── run.json
+```
 
 | 文件 | 内容 |
 |---|---|
-| `motion.pkl` / `motion.npz` | 50 Hz 动作：`root_pos`、`root_rot`（XYZW）、`dof_pos`、关节名和模型身份 |
-| `quality.json` | `accepted` 或 `review`，以及未通过原因 `flags` |
-| `identity.json` / `run.json` | 输入、实现与资产身份，以及执行状态、耗时和产物哈希 |
-| `motion.json` / `motion.diagnostics.npz` | 接触、目标和求解诊断，供排查异常 |
-| `training.npz` | 仅通过时生成，格式为 `root_joint_lossless_v1` |
+| `selection.json` | 该动作的结果状态、选中阶段及路径 |
+| `accepted.json` | 训练准入列表；下游读取 `motions`，路径相对于输出根目录 |
+| `frax/motion.pkl` / `motion.npz` | 完整 50 Hz 机器人动作，待审结果也保留 |
+| `frax/quality.json` | 质量状态、失败标记、指标及检查范围 |
+| `frax/identity.json` / `run.json` | 输入、代码、依赖、资产身份与执行状态、耗时、产物哈希 |
+| `frax/motion.json` / `motion.diagnostics.npz` | 接触、目标和求解诊断 |
+| `frax/pipeline.json` / `pipeline.md` | 根据实际记录生成的流程解释 |
+| `frax/training.npz` | 仅质量通过时生成的训练导出 |
 
-`training.npz` 包含 `joint_pos`、`joint_names`、仅含 pelvis 的 `body_names/body_pos_w/body_quat_w`、帧率和转换身份；根四元数为 WXYZ。关节数据与预览逐值一致。下游须适配 `converter=dex_frax` 和此格式，需要全身刚体 FK、速度或训练特征时另行计算。
+预览动作字段：
 
-自动模式通过 `selection.json` 指定采用的阶段，下游只读取 `accepted.json` 的 `motions`。`accepted` 表示通过当前运动学检查，仍需下游动力学跟踪与真机验证。
+| 字段 | 形状或含义 |
+|---|---|
+| `root_pos` | `(T,3)`，米 |
+| `root_rot` | `(T,4)`，XYZW 四元数 |
+| `dof_pos` | `(T,29)`，弧度，顺序见 `joint_names` |
+| `fps` | 50 |
+| `joint_names`、`quat_order`、`model_sha256` | 关节顺序、四元数约定及模型身份 |
+
+启用局部减速时另有 `motion.time_map.npz`；动作文件保留 `source_time_s`、`source_frame_float` 和 `source_fps`。机器人按 `i / 50` 播放，人体对照按源时间映射采样。
+
+`training.npz` 使用 `storage_format=root_joint_lossless_v1`、`converter=dex_frax`：`joint_pos` 与预览关节数据逐值一致，`body_names` 仅含 pelvis，`body_pos_w` 为 `(T,1,3)`，`body_quat_w` 为 `(T,1,4)`，根四元数 **WXYZ**。下游按模型身份和关节顺序读取；全身刚体 FK、速度或其他训练特征需另行计算。
+
+`run.json` 的 `complete` 表示执行完成，质量状态查看 `quality.json`。`accepted` 只覆盖所列运动学检查，不表示动力学或真机验证通过。

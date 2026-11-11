@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "baseline_id": "2026-11-11-v26",
+  "archive_id": "Dex-Retarget_当前版本_20261111_v26",
+  "package_version": "0.8.2",
+  "solver_policy": "frax_fast_persistent_window_refine_v27",
+  "initial_policy": "pelvis_waist_joint_height_feet_arms_geometry_v9",
+  "quality_policy": "scoped_collision_support_temporal_v7",
+  "validation_mode": "v26_refine_outputs_reaudited_with_0.8.2",
+  "default_mode": "fast",
+  "dynamics_validation": "deferred_by_user",
+  "robot_validation": "not_performed",
+  "full_library_validation": "not_performed",
+  "acceptance_thresholds_changed": false,
+  "motions": {
+    "dance-boy": {
+      "frames": 3745,
+      "fps": 50,
+      "pose_frames": 192,
+      "status": "review"
+    },
+    "dance-girl": {
+      "frames": 12104,
+      "fps": 50,
+      "pose_frames": 697,
+      "status": "review"
+    }
+  },
+  "documentation": "docs/CURRENT_VERSION.md"
+}

@@ -55,3 +55,18 @@ def dense_floor(robot,rr,rows,cache,changed,valid):
     else:values=floor_samples(robot,{'root_r':rr},rows)
     cache['floor']=values
     return values
+
+
+def clear_dense_window(cache,start,end,n):
+    """A cached nonnegative minimum proves every declared pair nonnegative.
+
+    Only exact float32 export-audit caches are supplied by the caller. Missing
+    coverage is never treated as clear. Existing penetrations still need their
+    per-pair comparison; this shortcut applies only to completely clear input
+    and candidate windows.
+    """
+    samples=cache.get('full_collision',{}).get('samples')
+    floor=cache.get('floor')
+    if samples is None or floor is None or len(samples)!=(n-1)*8+1 or len(floor)!=len(samples):return False
+    low=start*8;high=(end-1)*8+1
+    return all(sample is not None and sample[0]>=0. for sample in samples[low:high])

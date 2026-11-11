@@ -34,14 +34,15 @@ def test_initial_solves_feet_before_arms_and_keeps_upstream_columns(monkeypatch)
     class Fake:
         def __init__(self,*a,**kw):self.report={'qp_nonconverged_steps':0}
         def __call__(self,r,t,cfg):
-            x=t['priority_pose'].copy();mask=t['priority_mask'];calls.append((x.copy(),mask.copy()));x[:,~mask]=len(calls)*.1
+            x=t['priority_pose'].copy();mask=t['priority_mask'];calls.append((x.copy(),mask.copy(),t.get('arm_self_collision',False)));x[:,~mask]=len(calls)*.1
             return x,np.zeros((5,1))
     monkeypatch.setattr(ik,'FraxIK',Fake)
     out,records,report=p.solve_protected(robot,{}, {},baseline,SimpleNamespace(iterations=8,initial_iterations=100,assets={}),root_mode='feasible')
     assert np.flatnonzero(~calls[0][1]).tolist()==[2]+list(range(3,15))
-    assert np.flatnonzero(~calls[1][1]).tolist()==list(range(3,15))
-    assert np.flatnonzero(~calls[2][1]).tolist()==list(range(18,32))
-    np.testing.assert_array_equal(out[:,3:15],.2)
+    assert np.flatnonzero(~calls[1][1]).tolist()==list(range(18,32))
+    assert [v[2] for v in calls]==[False,True]
+    assert len(calls)==report['foot_solver_passes']+1==2
+    np.testing.assert_array_equal(out[:,3:15],.1)
     np.testing.assert_array_equal(out[:,15:18],.2)
     np.testing.assert_array_equal(out[:,:2],0.)
     np.testing.assert_array_equal(out[:,2],.1)

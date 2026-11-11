@@ -81,5 +81,5 @@ def apply(targets,robot,angular_limit,linear_limit):
             v['foot_target_p'][active,2]=-np.min(R[:,2,:]@g['hull'].T,axis=1)
         for key in ('heel','toe'):
             v[key+'_speed']=np.linalg.norm(np.gradient(v[key],axis=0)*fps,axis=1)
-    report.update(calibration='preserved from full original sequence',contact_phases='nearest original phase; no redetection',reference='original source at source_time_s')
+    report.update(downstream_ik_required=True,interpolated_trajectory_is_seed_only=True,calibration='preserved from full original sequence',contact_phases='nearest original phase; no redetection',reference='original source at source_time_s')
     return out,indices/fps,report

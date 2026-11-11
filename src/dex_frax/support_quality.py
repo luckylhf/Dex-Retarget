@@ -6,6 +6,17 @@ POLICY=dict(name='confidence_aware_body_support_v1',confidence_min=.8,
             measured_load=False)
 
 
+def preserve_contact(contact, frame):
+    """Use the final trusted-contact predicate for prepared solver constraints.
+
+    Old callers without confidence evidence keep their conservative lock.
+    Explicit uncertain hints remain in the weighted pose objective.
+    """
+    if int(contact['mode'][frame])<=0:return False
+    if 'confidence' not in contact:return True
+    return float(contact['confidence'][frame])*float(contact.get('source_geometry_confidence',0.))>=POLICY['confidence_min']
+
+
 def evaluate_contacts(meta,dg,errors,n,fps):
     cfg=meta.get('configuration',{}).get('contact',{})
     scale=float(meta.get('leg_scale',1.))

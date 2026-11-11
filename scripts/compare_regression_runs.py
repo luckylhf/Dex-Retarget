@@ -1,39 +1,60 @@
-"""Compare two same-manifest batch runs; retain common gates and raw metrics."""
+"""Compare complete results from two regression suites or managed batches."""
 import argparse
 import json
 from pathlib import Path
-import numpy as np
-from summarize_regression import row
+
+from compare import compare_motions, summarize
+from dex_frax.cli import atomic_json, sha
+
+
+def read_results(root, manifest_sha256):
+    summary = root / 'summary.json'
+    batch = not summary.is_file()
+    path = root / 'batch.json' if batch else summary
+    report = json.loads(path.read_text())
+    if report['manifest_sha256'] != manifest_sha256:
+        raise ValueError(f'Manifest mismatch in {path}')
+    if batch and report['status'] != 'complete':
+        raise ValueError(f'Incomplete batch: {root}')
+    rows = {}
+    for record in report['records']:
+        expected = ('accepted', 'review') if batch else ('complete',)
+        if record['status'] not in expected:
+            raise ValueError(f"Incomplete case {record['case']} in {root}")
+        name = record['case'] if batch else f"{record['case']}:{record['mode']}"
+        folder = root / (record['case'] if batch else record['output'])
+        if not folder.resolve().is_relative_to(root.resolve()):
+            raise ValueError(f'Case output is outside {root}')
+        rows[name] = summarize(folder)
+    return report, rows
 
 
 def main():
-    p=argparse.ArgumentParser()
-    p.add_argument('suite',type=Path)
-    p.add_argument('--baseline',required=True)
-    p.add_argument('--candidate',required=True)
-    p.add_argument('--output',default='paired_comparison.json')
-    p.add_argument('--dense',action='store_true')
-    args=p.parse_args();root=args.suite.resolve()
-    manifest=json.loads((root/'manifest.json').read_text())
-    old=root/'results'/args.baseline;new=root/'results'/args.candidate
-    old_batch=json.loads((old/'batch.json').read_text());new_batch=json.loads((new/'batch.json').read_text())
-    if old_batch['manifest_sha256']!=new_batch['manifest_sha256']:
-        raise ValueError('Cannot compare different manifests')
-    records=[]
-    for case in manifest['cases']:
-        name=case['id'];before=row(old/name,args.dense);after=row(new/name,args.dense)
-        with np.load(old/name/'motion.diagnostics.npz') as a,np.load(new/name/'motion.diagnostics.npz') as b:
-            keys=[k for k in a.files if k in b.files and k!='solver_records' and not k.startswith('support_')]
-            changed=[k for k in keys if not np.array_equal(a[k],b[k])]
-        records.append(dict(case=name,baseline=before,candidate=after,changed_target_arrays=changed,
-                            byte_identical=before['motion_sha256']==after['motion_sha256']))
-        print(name,before['quality'],'->',after['quality'],after['common_flags'],flush=True)
-    result=dict(scope=manifest['scope'],baseline=args.baseline,candidate=args.candidate,
-                elapsed_s=dict(baseline=old_batch['elapsed_s'],candidate=new_batch['elapsed_s']),
-                manifest_sha256=old_batch['manifest_sha256'],cases=records,
-                common_pass={k:sum(not r[k]['common_flags'] for r in records) for k in ('baseline','candidate')},
-                timing_scope='sequential same-machine batch runs; single measurement, no parallel benchmark/test work')
-    (root/args.output).write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('suite', type=Path)
+    parser.add_argument('--baseline', required=True, type=Path)
+    parser.add_argument('--candidate', required=True, type=Path)
+    parser.add_argument('--output', type=Path, default=Path('paired_comparison.json'))
+    args = parser.parse_args()
+    root = args.suite.resolve()
+    manifest_sha256 = sha(root / 'manifest.json')
+    before, old = read_results(root / 'results' / args.baseline, manifest_sha256)
+    after, new = read_results(root / 'results' / args.candidate, manifest_sha256)
+    if old.keys() != new.keys():
+        raise ValueError('Regression cases or modes differ')
+    records = [
+        dict(case=name, baseline=old[name], candidate=new[name],
+             **compare_motions(old[name], new[name]))
+        for name in old
+    ]
+    atomic_json(root / args.output, dict(
+        baseline=str(args.baseline), candidate=str(args.candidate),
+        manifest_sha256=manifest_sha256, cases=records,
+        elapsed_s=dict(baseline=before['elapsed_s'], candidate=after['elapsed_s']),
+        passed={name: sum(row['quality'] == 'accepted' for row in rows.values())
+                for name, rows in [('baseline', old), ('candidate', new)]},
+    ))
 
 
-if __name__=='__main__':main()
+if __name__ == '__main__':
+    main()

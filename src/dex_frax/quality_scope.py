@@ -7,7 +7,7 @@ from functools import lru_cache
 @lru_cache(maxsize=1)
 def audit_implementation():
     root=Path(__file__).parent
-    return {name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ("acceptance.py","quality_pose.py","quality_v8.py","v8/audit.py","v8/self_collision.py","foot_collision.py","support_quality.py","temporal_quality.py")}
+    return {name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ("acceptance.py","quality_pose.py","quality_v8.py","v8/audit.py","v8/self_collision.py","foot_collision.py","ankle_collision.py","support_quality.py","temporal_quality.py")}
 
 
 def solver_history(report):
@@ -50,6 +50,7 @@ def describe(meta,check,result):
     contract=dict(version='export_audit_scope_v2',criteria=limits,implementation=audit_implementation(),model_sha256=meta.get('model_sha256'),foot_geometry_policy=collision.get('foot_coverage'),
         collision_pair_set_sha256=collision.get('pair_set_sha256'),collision_scope=collision.get('scope'),
         collision_pair_count=collision.get('pair_count'),interpolation_steps=collision.get('interpolation_steps'),
+        conditional_collision_exclusions=collision.get('conditional_exclusions'),
         temporal_policy=(check.get('temporal_quality') or {}).get('policy'),
         support_acceptance_m=result.get('support_acceptance_m'),adaptive_pose_policy=(result.get('adaptive_pose_gate') or {}).get('policy'))
     contract['fingerprint']=hashlib.sha256(json.dumps(contract,sort_keys=True,separators=(',',':')).encode()).hexdigest()

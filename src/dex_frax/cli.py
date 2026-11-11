@@ -22,11 +22,11 @@ def atomic_json(path, value):
 _FROZEN_IDENTITY=None
 
 def static_identity():
-    from .paths import ASSETS
+    from .paths import asset_fingerprints
     from . import __version__
     root = Path(__file__).parent
     files = {str(p.relative_to(root)): sha(p) for p in sorted(root.rglob("*")) if p.is_file() and p.suffix in (".py", ".json", ".bvh")}
-    model = {str(p.relative_to(ASSETS)): sha(p) for p in sorted(ASSETS.rglob("*")) if p.is_file()}
+    model = asset_fingerprints()
     import frax
     frax_root = Path(frax.__file__).parent
     frax_hashes = {str(p.relative_to(frax_root)): sha(p) for p in sorted(frax_root.rglob("*.py"))}
@@ -291,8 +291,10 @@ def main():
         if not math.isfinite(args.budget) or args.budget<=0:parser.error('Budget must be finite and positive')
         from .input_errors import MotionInputError
         try:
-            if args.mode=='auto':single_auto(args)
-            else:convert(args)
+            if args.mode=='auto':record=single_auto(args)
+            else:record=convert(args)
+            if isinstance(record,dict) and record.get('status') in ('failed','budget_exhausted','input_error'):
+                parser.exit(2 if record['status']=='input_error' else 1,'Conversion did not complete: '+record['status']+'. See the output records.\n')
         except MotionInputError as exc:
             parser.exit(2,'Motion input error: '+str(exc)+'\n')
     elif args.command == 'batch':
@@ -303,9 +305,18 @@ def main():
         if args.worker_resident_gib>args.worker_peak_gib:parser.error('Resident memory cannot exceed cold-worker peak')
         if not 50<=args.memory_target_percent<=95:parser.error('Memory target percent must be between 50 and 95')
         from .resources import contain_linux
-        if contain_linux(args) is not None:return
+        contained = contain_linux(args)
+        if contained is not None:
+            if contained:
+                parser.exit(contained)
+            return
         from .managed_batch import run
-        run(args)
+        records = run(args)
+        batch_status = json.loads((args.output / 'batch.json').read_text())['status']
+        failed = [row['status'] for row in records if row['status'] not in ('accepted', 'review')]
+        if batch_status != 'complete' or failed:
+            code = 2 if batch_status == 'complete' and set(failed) == {'input_error'} else 1
+            parser.exit(code, f'Batch did not finish all cases ({batch_status}). See batch.json.\n')
     else:
         from .preview import render
         render(args.motions, args.output, args.fps)

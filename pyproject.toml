@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dex-frax"
-version = "0.8.1"
+version = "0.8.2"
 description = "Retarget BVH and SMPL-X human motion to 50 Hz Dex robot references"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"

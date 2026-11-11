@@ -62,30 +62,23 @@ def test_unchanged_context_keeps_progress_but_changed_context_discards_it():
     assert not q.state(jobs[0])['progress']
 
 
-@pytest.mark.parametrize('recipe,qp_limit',[('legs10',20000),('legs10_elastic',80000),('geometry10',20000),('geometry10_elastic',80000)])
-def test_leg_proposal_moves_only_legs_and_pelvis_height(monkeypatch,recipe,qp_limit):
+@pytest.mark.parametrize('recipe',['legs10','geometry10_elastic'])
+def test_leg_proposal_shares_swept_support_fit_and_only_releases_legs_z(monkeypatch,recipe):
     from dex_frax import refine_pipeline as p
     from types import SimpleNamespace
     robot=SimpleNamespace(sides={'Left':{'leg':list(range(3,9))},'Right':{'leg':list(range(9,15))}})
     rows=np.zeros((12,32));job=dict(start=0,end=12,module='support' if recipe.startswith('geometry') else 'leg_collision',side=None)
-    t={'fps':50.,'sides':{},'root_r':np.tile(np.eye(3),(12,1,1))}
-    monkeypatch.setattr(p,'collision_seams',lambda *a:{})
-    monkeypatch.setattr(p,'movable_submodel',lambda model,ids:model)
-    monkeypatch.setattr(p,'collision_groups',lambda *a:{'collision':[]})
-    def solve(model,t,x,cfg,a,b,sides,options):
-        assert options['coupled'] and options['_moving_ids']==[2]+list(range(3,15))
-        assert np.isinf(options['root_position_m']) and options['body_joint_deg']==10
-        assert options['qp_iterations']==qp_limit
-        assert options['_elastic_recovery']==recipe.endswith('_elastic')
-        out=x.copy();out[:,options['_moving_ids']]=.01;return out,{}
-    monkeypatch.setattr(p,'_repair_window',solve)
-    import dex_frax.leg_similarity as ls
-    monkeypatch.setattr(ls,'errors',lambda *a:np.zeros((12,4)))
-    import dex_frax.leg_policy as lp
-    monkeypatch.setattr(lp,'plan',lambda *a:(np.ones((12,13))*.12,{}))
-    out,_=p.propose(robot,t,rows,rows,{'leg_direction':1.,'arm_direction':4.},None,job,recipe,float('inf'),{})
-    assert np.array_equal(out[:,15:],rows[:,15:]) and np.array_equal(out[:,:2],rows[:,:2])
-    assert np.all(out[:,2]==.01)
+    def fit(r,t,x,cfg,a,b,iterations,**kw):
+        assert kw['ids_override'].tolist()==[2]+list(range(3,15))
+        assert cfg['_restore_geometry'] and cfg['_safety_joint_deg']==10.
+        assert cfg['_safety_reference'] is rows and kw['allow_support']
+        out=x.copy();out[:,kw['ids_override']]=.01;return out,{}
+    monkeypatch.setattr(p,'fit_window',fit)
+    import dex_frax.local_geometry as geometry
+    monkeypatch.setattr(geometry,'project_root_height',lambda *a:None)
+    out,detail=p.propose(robot,{'sides':{}},rows,rows,{},None,job,recipe,float('inf'),{})
+    np.testing.assert_array_equal(out[:,:2],rows[:,:2]);np.testing.assert_array_equal(out[:,15:],rows[:,15:])
+    assert np.all(out[:,2]==.01) and detail['policy']=='shared_native_swept_support_geometry_v1'
 
 
 def test_correct_neighbor_reference_cannot_accumulate_avoidance_across_overlaps():
@@ -108,7 +101,8 @@ def test_collision_retries_precede_unvisited_similarity_but_rotate_safety_window
     queue.complete(collision,False)
     assert queue.next(jobs)['module']=='leg_collision'
     queue.complete(leg,False);queue.complete(leg,False)
-    assert queue.next(jobs)['module']=='leg_collision'  # Legs precede arms regardless of visits.
+    assert queue.next(jobs)['module']=='collision'  # Exhausted leg tiers do not create redundant routes.
+    assert not queue.choices(leg)
 
 
 def test_small_adoption_does_not_prevent_expanding_a_still_failing_window():

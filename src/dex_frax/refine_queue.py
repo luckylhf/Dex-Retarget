@@ -6,8 +6,8 @@ import numpy as np
 RECIPES={'collision':['direct10','recover10','direct20','recover20','direct30','recover30'],
          'torso':['source_fit','source_fit_collision','source_branch_collision'],
          'arms':['fit','current_best','guided_current','original_frax','guided_original'],
-         'support':['solve','geometry5','geometry10','geometry5_elastic','geometry10_elastic','solve_more'],'body':['solve','solve_more'],
-         'leg_collision':['legs5','legs10','legs5_elastic','legs10_elastic'],
+         'support':['geometry5_elastic','geometry10_elastic'],'body':['solve','solve_more'],
+         'leg_collision':['legs5','legs10'],
          'dense_floor':['solve','solve_more'],'jitter':['temporal','temporal_more']}
 for tier in (10,20,30):
     RECIPES['collision'].insert(RECIPES['collision'].index('direct'+str(tier)), 'sweep'+str(tier))
@@ -22,10 +22,10 @@ PADDING=(20,50,100)
 def jobs_from_masks(masks,n,core=101,padding=20):
     jobs=[]
     for stage,side,mask in masks:
-        local_core=11 if stage=='dense_floor' else core
-        local_padding=5 if stage=='dense_floor' else padding
+        local_core=11 if stage in ('dense_floor','jitter') else 21 if stage in ('support','body','leg_collision') else core
+        local_padding=5 if stage in ('dense_floor','jitter','support','body','leg_collision') else padding
         ranges=[(a,min(n,a+local_core)) for a in range(0,n,local_core)]
-        if stage in ('collision','leg_collision'):
+        if stage=='collision':
             # Keep a bounded collision episode away from immutable joins.
             # Arbitrary grid cuts can freeze already-penetrating boundary poses.
             edges=np.diff(np.r_[False,mask,False].astype(int));merged=[]
@@ -80,7 +80,7 @@ class WorkQueue:
                 elif state.get('round_improved'):
                     state.update(done=[],timed_recipes=[],stalled=[],progress={},round_improved=False)
                     state['rounds']=state.get('rounds',0)+1
-            padding=min(10,5+5*state['level']) if job['module']=='dense_floor' else PADDING[state['level']];job.update(start=max(0,job['core_start']-padding),end=min(n,job['core_end']+padding),context_level=state['level'])
+            padding=min(10,5+5*state['level']) if job['module'] in ('dense_floor','jitter','support','body','leg_collision') else PADDING[state['level']];job.update(start=max(0,job['core_start']-padding),end=min(n,job['core_end']+padding),context_level=state['level'])
             context=hashlib.sha256(np.ascontiguousarray(rows[max(0,job['start']-1):min(n,job['end']+1)]).tobytes()).hexdigest()
             if state.get('context')!=context:
                 own=context==state.pop('own_result_context',None)

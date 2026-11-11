@@ -1,2 +1,4 @@
 include README.md THIRD_PARTY.md requirements-lock.txt
 include docs/INPUTS.md docs/BATCH.md docs/FRAX_LICENSE
+include CURRENT_VERSION.json
+include docs/PIPELINE.md docs/SAFETY_REPAIR_RULES.md docs/CURRENT_VERSION.md

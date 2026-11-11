@@ -63,7 +63,14 @@ def test_recheck_does_not_trust_changed_evidence(tmp_path,name):
     with pytest.raises(ValueError,match='Recheck artifact hash changed'):verify(tmp_path,target,recheck=True)
 
 
-@pytest.mark.parametrize('name',['quality_pose.json','adaptive_policy.json','acceptance.py','v8/self_collision.py'])
+@pytest.mark.parametrize('name',['quality_pose.json','adaptive_policy.json','acceptance.py','v8/self_collision.py','ankle_collision.py'])
 def test_recheck_rejects_changed_safety_policy_even_with_same_version(tmp_path,name):
     target=completed_fast(tmp_path);target['implementation'][name]='changed'
     with pytest.raises(ValueError,match='Recheck safety policy changed'):verify(tmp_path,target,recheck=True)
+
+
+@pytest.mark.parametrize('name',['ik.py','pelvis_priority.py','kinematics.py','frax_foot_constraints.py','frax_arm_constraints.py','shoulder_reference.py'])
+def test_recheck_cannot_reuse_initial_after_its_solver_changes(tmp_path,name):
+    target=completed_fast(tmp_path);target['implementation'][name]='changed'
+    with pytest.raises(ValueError,match='initial solver changed; recompute initial'):
+        verify(tmp_path,target,recheck=True)

@@ -231,5 +231,4 @@ def contain_linux(args):
              '-p','MemorySwapMax=0',sys.executable,'-m','dex_frax',*sys.argv[1:]]
     env=dict(os.environ,DEX_FRAX_RESOURCE_SCOPE=unit)
     result=subprocess.run(command,env=env)
-    if result.returncode:raise RuntimeError(f'Protected batch exited with code {result.returncode}; inspect batch.json and the systemd scope')
-    return result.returncode
+    return result.returncode if result.returncode >= 0 else 128 - result.returncode
