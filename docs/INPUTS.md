@@ -138,7 +138,7 @@ body_models/
   --smplx-python "$SMPLX_PYTHON" --input-fps 30 --grounding contact
 ```
 
-`examples/inputs/smplx/gbtc/gbtc.pt` 是附带的一组 30 fps GVHMR 缓存，可直接替换上面示例中的 `.pt` 路径，运行方式见 [README](../README.md)。
+`examples/smplx/gbtc/gbtc.pt` 是附带的一组 30 fps GVHMR 缓存，可直接替换上面示例中的 `.pt` 路径，运行方式见 [README](../README.md)。
 
 `check-input` 只检查内容结构；实际模型文件、人体几何和支撑证据充分性在 `convert` 时检查。`--max-frames` 仅用于短输入接口测试，不能作为全片质量验收。SMPL-X 同样支持 `--mode fast`（默认）和 `--mode refine`。两种模式的 `--budget` 都限制包含人体准备在内的总时间。精修另支持 `--repair-budget` 和检查点续跑，见 [流程说明](PIPELINE.md#检查点与续跑)。
 
@@ -154,12 +154,12 @@ body_models/
 
 | 路径 | 用途 |
 |---|---|
-| `examples/inputs/bvh/nobody/nobody_without_calibration.bvh` | 可直接转换的人体 BVH，已移除开头校准帧 |
-| `examples/inputs/bvh/nobody/1013_nobody_chr01.bvh` | 含校准帧的原始 BVH，供核对预处理 |
-| `examples/inputs/smplx/gbtc/gbtc.pt` | 420 帧、30 fps 的 GVHMR 人体缓存；需另备 SMPL-X 模型和依赖 |
-| 两目录中的机器人 PKL/NPZ、`reference.npz` | 既有对照数据，不能作为人体输入，也不表示当前版本的验收结果 |
+| `examples/bvh/nobody/nobody.bvh` | 可直接转换的 mocap 骨架 BVH：2085 帧、90 fps、厘米、Y-up |
+| `examples/bvh/nobody/nobody_50Hz-Retarget.npz` | 该输入的 50 Hz 参考输出，1158 帧 |
+| `examples/smplx/gbtc/gbtc.pt` | 420 帧、30 fps 的 GVHMR 人体缓存；需另备 SMPL-X 模型和依赖 |
+| `examples/smplx/gbtc/gbtc_50Hz-Retarget.npz` | 该输入的 50 Hz 参考输出，699 帧 |
 
-BVH 示例的文件来源和 SHA-256 见目录内 `manifest.json`；GBTC 的逐文件哈希见其 `说明.txt`。
+参考 NPZ 是机器人动作（格式见下节），只能用于对照，不能当作人体输入，也不表示当前版本的验收结果。
 
 ## 输出格式
 

@@ -34,7 +34,7 @@ python3.12 -m venv .venv
 
 ```sh
 .venv/bin/dex-frax convert \
-  examples/inputs/bvh/nobody/nobody_without_calibration.bvh \
+  examples/bvh/nobody/nobody.bvh \
   outputs/nobody --source mocap
 ```
 
@@ -52,12 +52,23 @@ python3.12 -m venv .venv
 
 BVH 来源使用 `lafan`、`soma` 或 `mocap`；`mocap` 需要已适配的骨架，不能直接接收任意 BVH。BVH 默认厘米、`absolute` 位置通道，可通过 `--bvh-units` 和 `--bvh-translations` 指定。
 
+`examples/` 只放输入和一份参考输出：
+
+| 文件 | 内容 |
+|---|---|
+| `examples/bvh/nobody/nobody.bvh` | 2085 帧、90 fps 的 mocap 骨架 BVH（厘米、Y-up），配合 `--source mocap` |
+| `examples/bvh/nobody/nobody_50Hz-Retarget.npz` | 该输入的 50 Hz 参考输出，1158 帧 |
+| `examples/smplx/gbtc/gbtc.pt` | 420 帧、30 fps 的 GVHMR SMPL-X 参数缓存，需另备人体模型与依赖 |
+| `examples/smplx/gbtc/gbtc_50Hz-Retarget.npz` | 该输入的 50 Hz 参考输出，699 帧 |
+
+参考 `.npz` 与转换结果的 `motion.npz` 同格式（`root_pos`、`root_rot`（XYZW）、`dof_pos`、`joint_names`、`quat_order`、`model_sha256`、`robot`），用于数值对照；`preview` 只接受 PKL，不能直接播放这两个文件。示例只用于跑通流程，参考输出不代表当前 `accepted` 结论。
+
 SMPL-X 输入先按 [输入规范](docs/INPUTS.md#smpl-x) 配置 `SMPLX_PYTHON` 和 `SMPLX_MODEL_DIR`，再运行：
 
 ```sh
-.venv/bin/dex-frax check-input examples/inputs/smplx/gbtc/gbtc.pt \
+.venv/bin/dex-frax check-input examples/smplx/gbtc/gbtc.pt \
   --smplx-python "$SMPLX_PYTHON" --input-fps 30
-.venv/bin/dex-frax convert examples/inputs/smplx/gbtc/gbtc.pt outputs/gbtc \
+.venv/bin/dex-frax convert examples/smplx/gbtc/gbtc.pt outputs/gbtc \
   --source smplx --body-models "$SMPLX_MODEL_DIR" \
   --smplx-python "$SMPLX_PYTHON" --input-fps 30 --grounding contact
 ```

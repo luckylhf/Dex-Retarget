@@ -12,9 +12,9 @@ import hashlib
 import json
 from pathlib import Path
 
-root = Path('examples/inputs/bvh/nobody').resolve()
+root = Path('examples/bvh/nobody').resolve()
 source = 'mocap'  # LAFAN1 用 lafan，SOMA Uniform 用 soma
-inputs = sorted(root.rglob('*without_calibration.bvh'))
+inputs = sorted(root.rglob('*.bvh'))
 if not inputs:
     raise SystemExit('没有找到 BVH，请检查目录与匹配规则')
 cases = [dict(id=f'motion_{i:06d}', input=str(p), source=source,
