@@ -8,7 +8,7 @@ import time
 import json
 from pathlib import Path
 import numpy as np
-from scipy.sparse import block_diag, diags, eye, kron, vstack
+from scipy.sparse import block_diag, csc_matrix, diags, eye, hstack, kron, vstack
 from scipy.spatial.transform import Rotation
 from .v8.solver import Objective
 from .v8.trajectory import _qp
@@ -47,6 +47,23 @@ def _floor(robot, t, xs, a, b):
             z = robot.point(body)[2] + np.min(np.asarray(surface['hull']) @ robot.rot(body)[2])
             minimum = min(minimum, z)
     return float(minimum)
+
+
+def _qp_with_collision_slack(P, gradient, constraints, lower, upper, soft_rows):
+    n, count = len(gradient), len(soft_rows)
+    columns = csc_matrix((-np.ones(count), (soft_rows, np.arange(count))),
+                         shape=(constraints.shape[0], count))
+    # Slack only changes the selected collision inequalities. Joint, speed,
+    # contact and floor rows keep their original bounds.
+    constraints = vstack([hstack([constraints, columns]),
+                          hstack([csc_matrix((count, n)), eye(count)])], format='csc')
+    objective = block_diag([P, .01 * eye(count)], format='csc')
+    result, report = _qp(objective, np.r_[gradient, np.full(count, 8.)], constraints,
+                         np.r_[lower, np.zeros(count)], np.r_[upper, np.full(count, np.inf)],
+                         np.r_[np.zeros(n), np.maximum(-upper[soft_rows], 0.)],
+                         scaling=10, require_optimal=False, feasible_tolerance=1e-6)
+    report.update(owned_elastic_rows=count, owned_collision_slack_max_m=float(result[n:].max()))
+    return result[:n], report
 
 
 def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objective_factory=None,local_checks=False,allow_support=False,seed=None):
@@ -89,7 +106,8 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
     # outside second differences. Clip endpoints follow the same convention.
     fixed_frames=[]
     restore=bool(cfg.get('_restore_geometry',False))
-    if restore:
+    initial_leg=restore and bool(cfg.get('_initial_leg_repair'))
+    if restore and not initial_leg:
         from .adaptive_refine import inspect,window_targets
         boundary=inspect(robot,window_targets(t,a,b,len(xs)),xs[a:b])
         passing=(boundary['contact']<=.001)&(boundary['floor']>=-.001)
@@ -144,7 +162,8 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
     geometry=None
     if allow_support:
         from .local_geometry import Geometry
-        geometry=Geometry(robot,t,xs,a,b,ids,moves,restore=restore,fixed_frames=fixed_frames)
+        geometry=Geometry(robot,t,xs,a,b,ids,moves,restore=restore,fixed_frames=fixed_frames,
+                          initial_leg_repair=initial_leg,collision_cfg=cfg.get('_initial_leg_collision_cfg'))
     if geometry and not restore and geometry.evaluate(q.ravel())>1e-8:
         # Start from the feasible boundary reference when a branch proposal
         # violates floor/support; hard constraints cannot certify that seed.
@@ -172,7 +191,9 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
     already_clear=bool(restore and geometry and geometry.last.get('safety_goal_met',False))
     for iteration in range(start_iteration,start_iteration if already_clear else iterations):
         save_iteration(iteration)
-        if cfg.get('_repair_deadline') is not None and time.monotonic()>=cfg['_repair_deadline']:raise TimeoutError('local_geometry_deadline')
+        if cfg.get('_repair_deadline') is not None and time.monotonic()>=cfg['_repair_deadline']:
+            if initial_leg and accepted:break
+            raise TimeoutError('local_geometry_deadline')
         res, J = evaluate(z, True)
         at = A @ z; dl, du = low-at, high-at
         dl[:z.size] = np.maximum(dl[:z.size], -.3)
@@ -183,10 +204,18 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
             constraints=vstack([A,G],format='csc');dl=np.r_[dl,gl];du=np.r_[du,gh]
         H=J.T@J+eye(z.size,format='csc')*.01;gradient=J.T@res
         objective_scale=max(1.,float(abs(H.diagonal()).max()))
-        delta, qp_report = _qp(H/objective_scale,
-                       gradient/objective_scale, constraints, dl, du, np.zeros(z.size), scaling=10,
-                       require_optimal=not (restore or bool(cfg.get('_temporal_repair_gain',0.))),
-                       feasible_tolerance=1e-6 if restore else 1e-7)
+        try:
+            if initial_leg and geometry and geometry.elastic_rows:
+                delta, qp_report = _qp_with_collision_slack(H/objective_scale,gradient/objective_scale,
+                    constraints,dl,du,np.asarray(geometry.elastic_rows)+A.shape[0])
+            else:
+                delta, qp_report = _qp(H/objective_scale,
+                    gradient/objective_scale, constraints, dl, du, np.zeros(z.size), scaling=10,
+                    require_optimal=not (restore or bool(cfg.get('_temporal_repair_gain',0.))),
+                    feasible_tolerance=1e-6 if restore else 1e-7)
+        except (ValueError,RuntimeError):
+            if initial_leg and accepted:break
+            raise
         qp_report['objective_scale']=objective_scale
         qp_reports.append(qp_report)
         moved = False
@@ -194,6 +223,9 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
             candidate = z + alpha*delta
             r = evaluate(candidate); geometric_cost=geometry.evaluate(candidate) if geometry else 0.
             if geometry and cfg.get('_temporal_repair_gain',0.) and not restore and geometric_cost>1e-6:continue
+            if initial_leg and geometry and (geometry.last['floor_regression_m']>2e-6 or
+                                              geometry.last['contact_regression_m']>1e-7):
+                continue
             new_cost = float(r @ r)+geometric_cost
             old_linear=max(float(np.max(low-A@z)),float(np.max(A@z-high)),0.)
             new_linear=max(float(np.max(low-A@candidate)),float(np.max(A@candidate-high)),0.)

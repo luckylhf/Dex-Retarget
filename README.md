@@ -41,7 +41,9 @@ python3.12 -m venv .venv
 | 模式 | 行为 |
 |---|---|
 | `--mode fast`（默认） | 完整 Frax 求解、导出和质量检查 |
-| `--mode refine` | 分层生成初解，再修复有问题的窗口，最终整片复查 |
+| `--mode refine` | 自动选择腿脚初解路线，再修复问题窗口并整片复查 |
+
+`refine` 检查原始 Frax 轨迹的下肢碰撞。碰撞少时保留原始腿脚，仅修对应窗口；碰撞多或窗口修复未通过检查时，使用整片腿脚求解。实际路线记录在 `motion.json` 的 `frax.body_priority.lower_routing`。
 
 ```sh
 .venv/bin/dex-frax convert input.bvh outputs/refined \

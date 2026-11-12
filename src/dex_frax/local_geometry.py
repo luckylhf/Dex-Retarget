@@ -8,9 +8,11 @@ from .support_quality import preserve_contact
 
 
 class Geometry:
-    def __init__(self,robot,t,xs,a,b,ids,moves,restore=False,fixed_frames=()):
+    def __init__(self,robot,t,xs,a,b,ids,moves,restore=False,fixed_frames=(),*,initial_leg_repair=False,collision_cfg=None):
         self.r,self.t,self.xs,self.a,self.b,self.ids=robot,t,xs,a,b,np.asarray(ids)
         self.restore=restore;self.fixed=set(fixed_frames);self.n=b-a;self.width=len(ids)
+        self.initial_leg_repair=initial_leg_repair
+        self.elastic_rows=[]
         self.bodies=[body for body in robot.surface_models if moves(body)]
         self.collision=None;self.palms=None
         joints=[j for j in ids if j>=3]
@@ -18,7 +20,7 @@ class Geometry:
         if joints:
             from .v8.self_collision import CollisionModel
             from .refine_routing import movable_submodel,collision_groups
-            self.collision=movable_submodel(CollisionModel(robot,{'coverage':'full'}),joints)
+            self.collision=movable_submodel(CollisionModel(robot,dict(collision_cfg or {},coverage='full')),joints)
             passive=np.zeros(len(self.collision.pairs),bool)
             if not sides:passive[collision_groups(self.collision)['collision']]=True
             if sides:
@@ -72,7 +74,7 @@ class Geometry:
 
     def evaluate(self,z,linear=False):
         r=self.r;qs=z.reshape(self.n,self.width);rows=[];columns=[];values=[];lower=[];upper=[];penalty=0.;worst_floor={};worst_pair={}
-        nonreg=0.;floor_min=float('inf');contact_max=0.;collision_min=float('inf');interior_floor=float('inf');interior_collision=float('inf')
+        nonreg=0.;floor_reg=0.;contact_reg=0.;floor_min=float('inf');contact_max=0.;collision_min=float('inf');interior_floor=float('inf');interior_collision=float('inf')
         def add(J,lo,hi,j,u=0.):
             J=np.atleast_2d(J);lo=np.broadcast_to(np.atleast_1d(lo),(len(J),));hi=np.broadcast_to(np.atleast_1d(hi),(len(J),))
             for k,row in enumerate(J):
@@ -94,7 +96,7 @@ class Geometry:
                 hull=r.surface_models[body]['hull'];heights=hull@r.rot(body)[2]+r.point(body)[2];v=int(np.argmin(heights));height=float(heights[v]);gap=height-ft[k]
                 floor_min=min(floor_min,height)
                 if 0<=j<self.n and not (j==self.n-1 and u):interior_floor=min(interior_floor,height)
-                penalty+=max(-gap,0.)**2;nonreg=max(nonreg,min(bf[k],-.001)-height)
+                penalty+=max(-gap,0.)**2;floor_reg=max(floor_reg,min(bf[k],-.001)-height);nonreg=max(nonreg,floor_reg)
                 key=(j,body)
                 if linear and height<.02:
                     if not u:
@@ -114,7 +116,7 @@ class Geometry:
             for side,tolerance,bound,original_bound in feet:
                 g=r.sides[side];v=self.t['sides'][side];point=r.point(g['foot'],v['pivots'][self.a+j]);hull=g['hull'];low=hull[np.argmin(hull@r.rot(g['foot'])[2])]
                 value=np.r_[point[:2]-v['anchors'][self.a+j,:2],r.point(g['foot'],low)[2]];norm=float(np.linalg.norm(value));contact_max=max(contact_max,norm)
-                penalty+=max(norm-bound,0.)**2;nonreg=max(nonreg,norm-original_bound)
+                penalty+=max(norm-bound,0.)**2;contact_reg=max(contact_reg,norm-original_bound);nonreg=max(nonreg,contact_reg)
                 if linear:
                     P,_=r.jac(g['foot'],v['pivots'][self.a+j]);G,_=r.jac(g['foot'],low);J=np.vstack([P[:2],G[2]])[:,self.ids];add(J,-tolerance-value,tolerance-value,j)
                     if norm>1e-10:add((value/norm)@J,-np.inf,bound-norm,j)
@@ -130,6 +132,7 @@ class Geometry:
                 nonreg=max(nonreg,excess-np.deg2rad(.001))
                 if linear:add(C,-np.inf,h,j)
         if linear:
+            self.elastic_rows=[]
             # Keep every near collision witness from the eight audit samples.
             # One representative per pair can trade penetration between
             # fractions, stalling or failing the independent dense guard.
@@ -142,11 +145,19 @@ class Geometry:
                 model=self.collision;model.update(x,rotation);a,b=map(int,model.pairs[k]);value=mujoco.mj_geomDistance(model.m,model.configuration.data,a,b,model.cfg['detection_m'],self._fromto)
                 derivative=compute_contact_normal_jacobian(model.m,model.configuration.data,a,b,self._fromto,self._normal,self._jac1,self._jac2)
                 G=(-1. if value>=0. else 1.)*derivative[r.cols[self.ids]]
+                if self.initial_leg_repair:
+                    _,_,_,_,_,target,_,baseline=self.samples[index]
+                    # An owned row has a positive restoration target. Only a
+                    # pair already penetrating at this sample can take slack.
+                    if target[k]>0. and baseline[k]<-model.cfg['penetration_tolerance_m']:
+                        self.elastic_rows.append(len(lower))
                 add(G,-np.inf,max(gap,-.008) if self.restore else gap,j,u)
             return sparse.csc_matrix((values,(rows,columns)),shape=(len(lower),len(z))),np.asarray(lower),np.asarray(upper)
         self.last=dict(nonregression_excess=max(nonreg,0.),minimum_floor_m=floor_min,maximum_contact_m=contact_max,minimum_collision_m=collision_min,
             interior_floor_m=interior_floor,interior_collision_m=interior_collision,
             safety_goal_met=(interior_floor>=-.00098 and interior_collision>=-1e-5 and contact_max<=.00098 and nonreg<=2e-6))
+        if self.initial_leg_repair:
+            self.last.update(floor_regression_m=floor_reg,contact_regression_m=contact_reg)
         return 1e8*penalty
 def project_root_height(robot, targets, rows, start, end):
     """Solve the vertical translation subproblem without changing any hinge.

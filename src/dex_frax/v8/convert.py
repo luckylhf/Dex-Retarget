@@ -74,6 +74,8 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
     from ..initial_reuse import target_digest
     prepared_targets_sha256=target_digest(t)
     stage_times={};stage_start=time.monotonic()
+    if hasattr(initial_solver,'initial_collision_cfg'):
+        initial_solver.initial_collision_cfg=cfg.get('self_collision')
     phase('initial',compile_possible=initial_solver is not None and not getattr(initial_solver,'strict',False))
     if initial_solver is None:phase('v8_ik')
     x,records=(solve if initial_solver is None else initial_solver)(robot,t,cfg['solver'],lambda i,n:print(f'{output.stem}: {i}/{n} {time.monotonic()-start:.1f}s',flush=True))

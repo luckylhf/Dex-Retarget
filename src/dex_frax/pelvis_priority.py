@@ -50,10 +50,10 @@ def waist_trajectory(robot,t,seed,cfg=None,collision_cfg=None,report=None):
     return out,ids
 
 
-INITIAL_POLICY='pelvis_waist_joint_height_feet_arms_geometry_v9'
+INITIAL_POLICY='pelvis_waist_adaptive_feet_arms_geometry_v10'
 
 
-def solve_protected(robot,t,cfg,baseline,base_solver,root_mode='source',progress=None):
+def solve_protected(robot,t,cfg,baseline,base_solver,root_mode='source',progress=None,*,auto_lower=False,collision_cfg=None):
     from .ik import FraxIK
     from .initial_reuse import target_digest
     start=time.monotonic();seed=baseline.copy();target_sha=target_digest(t)
@@ -67,7 +67,16 @@ def solve_protected(robot,t,cfg,baseline,base_solver,root_mode='source',progress
     if progress:print('initial: waist',flush=True)
     body_check={};rows,waist=waist_trajectory(robot,t,seed,cfg,report=body_check)
     reports={};all_records=[]
-    for name,moving in [('feet',np.r_[2,legs] if root_mode=='feasible' else legs),('arms',arms)]:
+    stages=[('feet',np.r_[2,legs] if root_mode=='feasible' else legs),('arms',arms)]
+    lower_routing=None
+    if auto_lower and root_mode=='feasible':
+        from .initial_lower import route
+        candidate,lower_routing=route(robot,t,rows,cfg,collision_cfg)
+        if candidate is not None:
+            rows=candidate
+            stages=stages[1:]
+        if progress:print('initial: '+lower_routing['selected']+' ('+lower_routing['reason']+')',flush=True)
+    for name,moving in stages:
         if progress:print('initial: '+name,flush=True)
         mask=np.ones(32,bool);mask[moving]=False;reference=rows.copy()
         local=dict(t,priority_pose=reference,priority_mask=mask,foot_self_collision=name=='feet',arm_self_collision=name=='arms')
@@ -84,7 +93,10 @@ def solve_protected(robot,t,cfg,baseline,base_solver,root_mode='source',progress
     return rows,all_records[-1],dict(body_geometry_preflight=body_check,torso_reference_error_deg=torso_errors(robot,t,rows).tolist(),
         policy=INITIAL_POLICY,root_mode=root_mode,elapsed_s=time.monotonic()-start,limb_solver=report,
         prepared_targets_sha256=target_sha,downstream_stages_recomputed_on_actual_timeline=True,ordered_limb_solvers=reports,
-        stage_order=['pelvis','waist','feet','arms'],foot_solver_passes=1,root_height_optimized_with_feet=root_mode=='feasible',feet_locked_during_arm_solve=True)
+        stage_order=['pelvis','waist','feet' if 'feet' in reports else 'local_feet','arms'],
+        lower_routing=lower_routing,foot_solver_passes=int('feet' in reports),
+        root_height_optimized_with_feet=root_mode=='feasible' and ('feet' in reports or any(
+            trial['reason']=='kept' for trial in lower_routing['trials'])),feet_locked_during_arm_solve=True)
 
 
 
@@ -103,12 +115,14 @@ class PelvisPriorityIK:
         self.settings=FraxIK(iterations,initial_iterations,improved=False)
         self.report={}
         self.root_mode=root_mode
+        self.initial_collision_cfg=None
 
     def __call__(self,robot,t,cfg,progress=None):
         baseline,records=self.base(robot,t,cfg,progress)
         self.baseline=baseline.copy()
         self.settings.assets=self.base.assets
-        rows,new_records,detail=solve_protected(robot,t,cfg,baseline,self.settings,self.root_mode,progress)
+        rows,new_records,detail=solve_protected(robot,t,cfg,baseline,self.settings,self.root_mode,progress,
+                                                auto_lower=True,collision_cfg=self.initial_collision_cfg)
         self.report=dict(detail['limb_solver'],body_priority=detail,
                          raw_frax_report=self.base.report)
         self.report['qp_nonconverged_steps']+=self.base.report.get('qp_nonconverged_steps',0)
