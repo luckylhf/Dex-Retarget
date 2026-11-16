@@ -78,6 +78,22 @@ rm -f outputs/batch/STOP
 
 启动后生成 `resource_policy.json`，约每 2 秒检查更新。可调整 `workers`、`memory_learning`、`compile_extra_gib` 和 `stages.frax` 内存估算；并发不能超过启动上限。修改资源策略不改变求解参数或验收门槛。完整选项见 `dex-frax batch --help`。
 
+## 模型与编译缓存
+
+首次运行的时间主要花在 MuJoCo 模型编译和 JAX kernel 编译上；批处理会把产物缓存下来，供后续批次和后续动作复用。全部位于状态目录，默认 `~/.cache/dex-frax`，可用 `DEX_FRAX_STATE_DIR` 指定。
+
+| 缓存 | 位置 | 内容 |
+|---|---|---|
+| MuJoCo 二进制模型 | `models/<key>/model.mjb` | 由 `assets/dex_evt/mjcf/dex_29.xml` 编译，加载前逐数组与 XML 版比对；`key` 由资产哈希与 mujoco 版本决定 |
+| JAX 持久编译缓存 | `jax_cache/` | 固定计算块的编译产物，跨进程复用 |
+| 编译锁 | `compiler/` | worker 间串行编译，避免重复占用，进程退出自动释放 |
+
+- MuJoCo 模型缓存只在批处理启用：调度器编译一次并校验，spawn worker 直接加载二进制模型，各自持有独立 MjData，不 fork 已初始化的 JAX。单文件 `convert` 仍按 XML 解析，但共用同一份 JAX 持久缓存。
+- 进程内热缓存只作用于同一进程的后继动作：kinematic model 最多 4 份，编译 kernel 最多 `DEX_FRAX_KERNEL_CACHE_SIZE`（默认 2）份。批处理 worker 连续处理多条动作，通常从第二条起不再编译。
+- 计算块长度固定为 `--ik-block-frames`（默认 128）才能复用编译结果；改动该值等于换一套缓存。
+- 缓存按内容身份匹配，不做跨机器迁移：换 CPU 架构、换依赖版本、改权重或改块长都会重新编译，属于预期行为。
+- `models/<key>/receipt.json` 记录二进制哈希、参与比对的数组和生成条件；校验不通过会直接报错，不会静默重新编译。需要强制冷启动时，删除状态目录下对应的 `models` 或 `jax_cache` 子目录即可，两者互不影响。
+
 ## 状态与结果
 
 | 文件 | 用途 |

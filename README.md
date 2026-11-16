@@ -127,6 +127,8 @@ SMPL-X 输入先按 [输入规范](docs/INPUTS.md#smpl-x) 配置 `SMPLX_PYTHON` 
 
 默认 `fast`，使用可用 CPU 并按内存准入控制并发。批次总预算默认 1800 秒，磁盘默认预留 80 GiB；请按任务规模设置 `--budget`、`--workers` 和 `--disk-reserve-gib`。停止与续跑方法见批处理文档。
 
+首次批处理会编译 MuJoCo 模型与 JAX kernel 并写入 `~/.cache/dex-frax`（可用 `DEX_FRAX_STATE_DIR` 改），后续批次和同一进程里的后续动作复用这些产物；换机器架构、改依赖、改权重或改 `--ik-block-frames` 都会重新编译。分层与失效规则见 [模型与编译缓存](docs/BATCH.md#模型与编译缓存)。
+
 ## 检查范围
 
 质量检查覆盖配置中的限位、限速、自碰撞、地面、支撑、抖动及姿态指标。碰撞基于声明的凸几何与帧间有限采样；同侧脚—小腿在踝 pitch、roll 均处于模型限位内时按既定规则排除，跨腿和双脚检查保留。
