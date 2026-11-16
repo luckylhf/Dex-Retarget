@@ -48,6 +48,18 @@ PY
 
 `refine` 未指定单条时限时，受批次剩余总预算限制。需要保持原节奏时，不启用 `--allow-local-slowdown`；其含义见 [时间映射](PIPELINE.md#帧率与时间映射)。
 
+跑满 CPU 的精修批次：
+
+```sh
+.venv/bin/dex-frax batch manifest.json outputs/batch \
+  --mode refine --budget 1800 --workers auto \
+  --frax-timeout 600 --repair-budget 240
+```
+
+- `--workers auto` 已经等于可用逻辑核数，限制实际并发的是内存准入，不是 worker 数。
+- `--frax-timeout` 建议显式给出：精修未指定时单条动作时限等于批次剩余预算，第一条难动作可能把 1800 秒用完；超时动作保留部分输出并记为待审，不中断其他动作。
+- `--repair-budget` 只计局部修复那一段，不含初解和最终整片审计。
+
 ## 停止与续跑
 
 ```sh
@@ -90,6 +102,7 @@ rm -f outputs/batch/STOP
 
 - MuJoCo 模型缓存只在批处理启用：调度器编译一次并校验，spawn worker 直接加载二进制模型，各自持有独立 MjData，不 fork 已初始化的 JAX。单文件 `convert` 仍按 XML 解析，但共用同一份 JAX 持久缓存。
 - 进程内热缓存只作用于同一进程的后继动作：kinematic model 最多 4 份，编译 kernel 最多 `DEX_FRAX_KERNEL_CACHE_SIZE`（默认 2）份。批处理 worker 连续处理多条动作，通常从第二条起不再编译。
+- 首次批次里只有一个 worker 能拿到编译锁，其余 worker 要等编译产物落进 `jax_cache` 才开始并发；所以开始阶段的 CPU 利用率偏低是正常现象，不是并发没开满。
 - 计算块长度固定为 `--ik-block-frames`（默认 128）才能复用编译结果；改动该值等于换一套缓存。
 - 缓存按内容身份匹配，不做跨机器迁移：换 CPU 架构、换依赖版本、改权重或改块长都会重新编译，属于预期行为。
 - `models/<key>/receipt.json` 记录二进制哈希、参与比对的数组和生成条件；校验不通过会直接报错，不会静默重新编译。需要强制冷启动时，删除状态目录下对应的 `models` 或 `jax_cache` 子目录即可，两者互不影响。

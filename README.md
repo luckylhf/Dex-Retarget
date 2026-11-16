@@ -43,6 +43,8 @@ python3.12 -m venv .venv
 | `--mode fast`（默认） | 完整 Frax 求解、导出和质量检查 |
 | `--mode refine` | 自动选择腿脚初解路线，再修复问题窗口并整片复查 |
 
+`--mode` 只有这两个取值；旧版的 `auto`、`v8`、`hybrid` 和 `--pipeline two-stage` 已移除，传入会被参数校验拒绝。
+
 `refine` 检查原始 Frax 轨迹的下肢碰撞。碰撞少时保留原始腿脚，仅修对应窗口；碰撞多或窗口修复未通过检查时，使用整片腿脚求解。实际路线记录在 `motion.json` 的 `frax.body_priority.lower_routing`。
 
 ```sh
@@ -125,7 +127,7 @@ SMPL-X 输入先按 [输入规范](docs/INPUTS.md#smpl-x) 配置 `SMPLX_PYTHON` 
 .venv/bin/dex-frax batch manifest.json outputs/batch --budget 604800
 ```
 
-默认 `fast`，使用可用 CPU 并按内存准入控制并发。批次总预算默认 1800 秒，磁盘默认预留 80 GiB；请按任务规模设置 `--budget`、`--workers` 和 `--disk-reserve-gib`。停止与续跑方法见批处理文档。
+默认 `fast`，使用可用 CPU 并按内存准入控制并发。批次总预算默认 1800 秒，磁盘默认预留 80 GiB；请按任务规模设置 `--budget`、`--workers` 和 `--disk-reserve-gib`。停止与续跑方法，以及跑满 CPU 的 `refine` 完整参数，见批处理文档的[启动与预算](docs/BATCH.md#启动与预算)。
 
 首次批处理会编译 MuJoCo 模型与 JAX kernel 并写入 `~/.cache/dex-frax`（可用 `DEX_FRAX_STATE_DIR` 改），后续批次和同一进程里的后续动作复用这些产物；换机器架构、改依赖、改权重或改 `--ik-block-frames` 都会重新编译。分层与失效规则见 [模型与编译缓存](docs/BATCH.md#模型与编译缓存)。
 
