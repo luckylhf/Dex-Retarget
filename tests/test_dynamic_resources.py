@@ -91,9 +91,22 @@ def test_batch_cli_defaults_to_dynamic_without_fixed_gib_or_core_count(monkeypat
     cli.main();args=calls[0]
     assert args.resource_mode=='dynamic' and args.memory_target_percent==90
     assert args.workers=='auto' and args.memory_reserve_gib is None and args.memory_limit_gib is None
+    assert args.resource_wait==0
 
 
 def test_priority_restrictions_do_not_break_resource_admission(monkeypatch):
     def denied(_):raise PermissionError('sandbox')
     monkeypatch.setattr(r.os,'nice',denied)
     assert r.lower_priority() is False
+
+
+@pytest.mark.parametrize('mode',['manual','dynamic'])
+def test_low_startup_ram_queues_workers_without_freezing_hard_cap(monkeypatch,mode):
+    monkeypatch.setattr(r.sys,'platform','linux');monkeypatch.setattr(r,'workers',lambda _:32)
+    monkeypatch.setattr(r,'memory',lambda:dict(total=64*r.GIB,available=3*r.GIB,cgroup_headroom=2*r.GIB,cgroup_limit=2*r.GIB))
+    monkeypatch.delenv('DEX_FRAX_RESOURCE_SCOPE',raising=False)
+    monkeypatch.setattr(r.shutil,'which',lambda _:'/usr/bin/systemd-run')
+    calls=[];monkeypatch.setattr(r.subprocess,'run',lambda cmd,**kw:(calls.append(cmd) or SimpleNamespace(returncode=0)))
+    args=SimpleNamespace(resource_mode=mode,memory_target_percent=90,memory_reserve_gib=10,memory_limit_gib=None,workers=32,worker_peak_gib=3.75)
+    assert r.contain_linux(args)==0
+    assert 'MemoryMax='+str(2*r.GIB) in calls[0]  # inherited hard limit is preserved

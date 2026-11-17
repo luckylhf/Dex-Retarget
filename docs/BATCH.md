@@ -45,10 +45,11 @@ PY
 | `--foot-contact` | 足部接触规则：`v1` 或 `v2`，默认 `v2`；整批统一，不支持逐条混用 |
 | `--workers` | 最大并发，默认 `auto`；实际并发还受内存准入限制 |
 | `--disk-reserve-gib` | 默认预留 80 GiB；低于底线时停止批次 |
+| `--resource-wait` | 默认 `0`，等待受总预算限制；manual 模式显式设置正值才限制无在途任务时的等待时长 |
 
 `refine` 未指定单条时限时，受批次剩余总预算限制。需要保持原节奏时，不启用 `--allow-local-slowdown`；其含义见 [时间映射](PIPELINE.md#帧率与时间映射)。
 
-跑满 CPU 的精修批次：
+以全部可用逻辑核为并发上限的精修批次（实际并发仍受内存准入限制）：
 
 ```sh
 .venv/bin/dex-frax batch manifest.json outputs/batch \
@@ -56,7 +57,7 @@ PY
   --frax-timeout 600 --repair-budget 240
 ```
 
-- `--workers auto` 已经等于可用逻辑核数，限制实际并发的是内存准入，不是 worker 数。
+- `--workers auto` 等于 CPU 配额及亲和性允许的逻辑核数；32 核时等价于 `--workers 32`，两者都不保证同时启动 32 个任务。
 - `--frax-timeout` 建议显式给出：精修未指定时单条动作时限等于批次剩余预算，第一条难动作可能把 1800 秒用完；超时动作保留部分输出并记为待审，不中断其他动作。
 - `--repair-budget` 只计局部修复那一段，不含初解和最终整片审计。
 
@@ -82,13 +83,39 @@ rm -f outputs/batch/STOP
 ## 资源设置
 
 - **CPU：** 默认以上下文允许的逻辑 CPU 数为并发上限，每进程单线程并在支持的平台绑定单核；编译、I/O 和内存会影响实际利用率。
-- **内存：** 默认 `--resource-mode dynamic --memory-target-percent 90`，按系统及其他程序合计占用控制准入，并计入编译峰值与在途增长。无可用内存时在总预算内等待，紧急压力下停止批次。
+- **内存：** 默认 `--resource-mode dynamic --memory-target-percent 90`，按系统及其他程序合计占用控制准入，并计入完整动作峰值、编译峰值与在途增长。内存不足时在总预算内等待；紧急压力下回收空闲进程，必要时逐条重排在途动作，不直接终止整批。
 - **Linux：** 多进程需要 `systemd-run --user` 建立 cgroup 内存硬限制并禁用交换，无法建立时拒绝启动；可用 `--memory-limit-gib` 收紧上限。macOS 使用准入和紧急停止。
-- **固定资源：** `--resource-mode manual` 默认预留主机内存 10 GiB；无任务在途且持续无法准入时，按 `--resource-wait` 结束等待。
+- **固定资源：** `--resource-mode manual` 默认预留主机内存 10 GiB；`--resource-wait 0` 默认同样等待至资源恢复或总预算耗尽，显式正值才限制空闲等待时间。Linux 硬上限不再按启动瞬间的剩余内存冻结；主机保留量和继承的 cgroup 限制仍约束后续准入。
 
 小批次可按实际空间设置 `--disk-reserve-gib 5`，大批次按预期输出量留足余量。状态目录默认为 `~/.cache/dex-frax`，可通过 `DEX_FRAX_STATE_DIR` 指定；同目录锁避免重复占用资源。
 
 启动后生成 `resource_policy.json`，约每 2 秒检查更新。可调整 `workers`、`memory_learning`、`compile_extra_gib` 和 `stages.frax` 内存估算；并发不能超过启动上限。修改资源策略不改变求解参数或验收门槛。完整选项见 `dex-frax batch --help`。
+
+### 预算计算与压力判断
+
+内存参数的默认值与含义见 [README：并发、内存预算与复用](../README.md#并发内存预算与复用)。Frax 初始单槽预算为 `worker_resident_gib × GiB + 输出帧数 × frame_memory_kib × 1024`，编译增量为 `max(0, worker_peak_gib − worker_resident_gib) × GiB`，作为单独预留，而非每槽重复预留。默认 resident=1、peak=3.75、frame=32；`--worker-peak-gib 6.5 --frame-memory-kib 48 --memory-reserve-gib 8` 是手动配置，不是默认值，也不保证满并发。
+
+内存学习默认启用，同一组至少完成两条动作后才使用学习值；冷启动时先逐条完成这两条动作再扩并发。学习身份包含完整转换契约，因此模式、足部规则、修复预算等配置不会混用旧样本。调度器为在途任务保留完整动作峰值，不因到达一次审计就释放后续预算，因为精修后还会重新审计。改源码、依赖或执行身份可能使历史学习值失效。`resource_policy.json` 可覆盖初始预算，因此核对实际运行时要同时查看启动参数、策略文件和 `resources.memory_learning`。
+
+准入时，剩余空间取 `min(主机 MemAvailable − 实际保留量, cgroup 可用余量)`，再与在途任务预计增长、新任务增量及单独编译预留比较；实际保留量在 dynamic 模式下为 `max(主机总内存 × (100 − target) / 100, 显式 reserve)`。活跃任务的真实占用可能超过初始估算，调度器不会仅因停止新增任务就自动缩小这些任务的工作集。
+
+旧版 `emergency_memory_floor` 只表示主机 `MemAvailable` 小于实际保留量的一半，不等于内核/cgroup OOM。当前低内存行为见下一节。PSS 用于减少共享页的重复计数；`worker_pss_bytes` 不包括整个作用域所有开销。`sampled_resource_peaks` 为采样峰值，不能当作连续内核计量。结合阶段和多次 CPU/内存采样判断稳定负载，不用启动瞬间或一条短动作的平均值承诺整批 32 路峰值。
+
+### 内存不足时的队列与恢复
+
+| 条件 | 自动处理 |
+|---|---|
+| 尚无两条同配置、同来源的完整内存样本 | 默认逐条跑完用于校准；`memory_calibration_wait`，等待不等于死机 |
+| 准入预算不足或主机可用内存低于保留量 | 停止派发，接收完成结果，优先回收空闲 worker；`memory_pressure_wait` 或 `priority_head_wait:memory_reserve` |
+| 主机可用内存低于保留量一半，或 cgroup 余量低于硬上限的 1%（最低 32、最高 256 MiB） | 先回收空闲进程，再逐次终止必要的单条在途动作并放回队列；每次重新采样，不预先重复计入释放量 |
+| worker 被 SIGKILL 且本批次 cgroup 的 OOM kill 计数增加 | 该条按 `cgroup_oom_retry` 重排；没有 OOM 证据的程序退出仍报告失败 |
+| 连一条动作的估算都放不下 | 保持队列、报告候选所需预算，等待容量恢复或总预算结束，不立即反复启动同一条动作 |
+
+重排记录为 `memory_retry`，部分输出与日志归档，未完成的 `training.npz` 不进入 accepted 清单；已通过结果继续保留并校验哈希。重试的是当前动作，可能从该动作开头重算，不能把批次重排当成任意帧断点续算。
+
+发生回退后，调度器提高同来源的内存估算下限（按峰值增加 25% 及 128 MiB 余量，并保留逐帧项），并下调并发上限；这些信息保存在 `resources.memory_queue`，续跑仍保留。每完成两条完整动作，上限可回升一槽，实际派发始终还受内存准入约束。实时降低策略文件里的预算不会清掉这层已观察到的压力下限。
+
+`--no-memory-learning` 跳过学习与冷启动校准，适合已有可靠完整峰值预算的手动运行；压力回收、单条重排仍生效。总预算计入排队和重试时间，不会自动无限延长。磁盘不足、STOP/信号、身份校验失败仍按各自规则处理；若硬 OOM 杀掉调度器本身，进程内队列无法自救，须检查现场后使用 `--resume`。不要删除输出目录来恢复。
 
 ## 模型与编译缓存
 
@@ -102,7 +129,8 @@ rm -f outputs/batch/STOP
 
 - MuJoCo 模型缓存只在批处理启用：调度器编译一次并校验，spawn worker 直接加载二进制模型，各自持有独立 MjData，不 fork 已初始化的 JAX。单文件 `convert` 仍按 XML 解析，但共用同一份 JAX 持久缓存。
 - 进程内热缓存只作用于同一进程的后继动作：kinematic model 最多 4 份，编译 kernel 最多 `DEX_FRAX_KERNEL_CACHE_SIZE`（默认 2）份。批处理 worker 连续处理多条动作，通常从第二条起不再编译。
-- 首次批次里只有一个 worker 能拿到编译锁，其余 worker 要等编译产物落进 `jax_cache` 才开始并发；所以开始阶段的 CPU 利用率偏低是正常现象，不是并发没开满。
+- 热 worker、MJB/JAX 缓存和内存学习默认启用，无需额外的“复用内存”参数。各 spawn 进程仍各自持有求解工作内存；磁盘缓存共享编译产物，不等于所有进程共享 JAX 堆。删除输出目录不会减少运行中任务的工作集，还会丢失结果与批次检查点。
+- 无完整内存样本时，先逐条完成两条动作进行校准；编译锁也只允许一个 worker 编译。首次运行开始阶段的 CPU 利用率偏低可能来自校准或编译等待，应结合状态中的等待原因判断。
 - 计算块长度固定为 `--ik-block-frames`（默认 128）才能复用编译结果；改动该值等于换一套缓存。
 - 缓存按内容身份匹配，不做跨机器迁移：换 CPU 架构、换依赖版本、改权重或改块长都会重新编译，属于预期行为。
 - `models/<key>/receipt.json` 记录二进制哈希、参与比对的数组和生成条件；校验不通过会直接报错，不会静默重新编译。需要强制冷启动时，删除状态目录下对应的 `models` 或 `jax_cache` 子目录即可，两者互不影响。

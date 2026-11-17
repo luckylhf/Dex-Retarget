@@ -42,6 +42,10 @@ class MemoryLearning:
     def key(mode,source,cache,reuse=False):
         return '|'.join((mode,source,'reuse' if reuse else 'solve','jax' if mode!='v8' or cache in ('jax_hot','jax_imported') else 'pure'))
 
+    def calibrated(self,mode,source,cache='jax_hot'):
+        profile=self.profiles.get(self.key(mode,source,cache),{})
+        return profile.get('completed_jobs',0)>=2
+
     def predict(self,mode,source,cache,frames,policy,stage=None,reuse=False):
         fallback=policy.peak(mode,frames)
         profile=self.profiles.get(self.key(mode,source,cache,reuse))

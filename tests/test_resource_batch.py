@@ -166,16 +166,17 @@ def test_no_spawn_when_insufficient_memory(setup):
     assert FakeSlot.calls==[]
     assert all(x['status']=='resource_exhausted' for x in records)
 
-def test_emergency_floor_aborts_own_workers(setup):
+def test_emergency_floor_without_active_work_waits_then_recovers(setup):
+    setup.resource_mode='dynamic'
     calls=0
     def monitor():
         nonlocal calls
         calls+=1
-        return snapshot(60 if calls<5 else 3)
+        return snapshot(3 if calls<10 else 60)
     records=batch.run(setup,FakeSlot,monitor)
     assert FakeSlot.running==0
-    assert all(x['status']=='resource_exhausted' for x in records)
-    assert json.loads((setup.output/'accepted.json').read_text())['motions']==[]
+    assert calls>=10
+    assert [x['status'] for x in records]==['accepted','accepted','accepted','review','input_error']
 
 def test_total_budget_cancels_without_adopting_partial_exports(setup,monkeypatch):
     setup.budget=.3
@@ -387,3 +388,166 @@ def test_unified_batch_default_keeps_resource_controls_and_does_not_enqueue_v8(s
     saved=json.loads((setup.output/'batch.json').read_text())
     assert saved['stage_order']==['frax'] and saved['pipeline']=='unified'
     assert saved['resources']['stage_barriers'] is False
+
+
+@pytest.mark.parametrize('cgroup',[False,True])
+def test_pressure_requeues_one_attempt_and_preserves_other_work(setup,monkeypatch,cgroup):
+    setup.mode='frax';setup.resource_mode='dynamic'
+    class Slow(FakeSlot):
+        closed_active=0
+        def start(self,*args):self.polls=0;super().start(*args)
+        def poll(self):
+            self.polls+=1
+            return None if self.polls<4 else super().poll()
+        def close(self):
+            if self.result is not None:type(self).closed_active+=1
+            super().close()
+    pressured=False
+    def monitor():
+        nonlocal pressured
+        if Slow.running>=3:pressured=True
+        s=snapshot(60)
+        if pressured and not Slow.closed_active:
+            if cgroup:s['cgroup_headroom']=16*r.MIB;s['cgroup_limit']=8*r.GIB
+            else:s['available']=3*r.GIB
+        return s
+    records=batch.run(setup,Slow,monitor)
+    state=json.loads((setup.output/'batch.json').read_text())
+    assert state['status']=='complete' and Slow.closed_active==1
+    assert state['resources']['memory_queue']['requeued_attempts']==1
+    assert sum(a['status']=='memory_retry' for record in records for a in record['attempts'])==1
+    assert next(record for record in records if record['case']=='easy')['status']=='accepted'
+    archives=[p for p in setup.output.rglob('*.interrupted.*') if p.is_dir()]
+    assert archives and all(not (p/'training.npz').exists() for p in archives)
+
+
+def test_completed_export_is_drained_before_low_memory_recovery(setup):
+    setup.mode='frax';setup.resource_mode='dynamic'
+    def monitor():
+        # The result exists before memory drops. Preserve it before reclaiming
+        # its now-idle process; do not relabel completed work as interrupted.
+        return snapshot(3 if FakeSlot.running else 60)
+    records=batch.run(setup,FakeSlot,monitor)
+    assert next(record for record in records if record['case']=='easy')['status']=='accepted'
+    assert not any(a['status']=='memory_retry' for rec in records for a in rec['attempts'])
+
+
+def test_cold_start_waits_for_two_full_completions_before_filling_slots(setup):
+    setup.mode='frax';setup.profile='refine'
+    class Observed(FakeSlot):
+        concurrency=[]
+        def start(self,*args):
+            super().start(*args)
+            self.telemetry=dict(phase='audit',stage='audit',cache_state='jax_hot',pss_bytes=r.GIB)
+            self.phase_peaks={'audit|jax_hot':r.GIB}
+            self.concurrency.append(type(self).running)
+    records=batch.run(setup,Observed,lambda:snapshot(60))
+    assert Observed.concurrency[:2]==[1,1]
+    assert max(Observed.concurrency[2:])>1
+    assert all(rec['status']!='resource_exhausted' for rec in records)
+
+
+@pytest.mark.parametrize('oom_evidence',[False,True])
+def test_only_confirmed_cgroup_oom_is_retried(setup,oom_evidence):
+    setup.mode='frax'
+    class Killed(FakeSlot):
+        killed=False
+        def poll(self):
+            if not type(self).killed:
+                type(self).killed=True;self.close()
+                return dict(status='failed',error_type='WorkerExit',exit_code=-9)
+            return super().poll()
+    def monitor():
+        s=snapshot(60)
+        s['cgroup_oom_kills']=int(oom_evidence and (Killed.running>0 or Killed.killed))
+        return s
+    records=batch.run(setup,Killed,monitor)
+    retries=[a for rec in records for a in rec['attempts'] if a['status']=='memory_retry']
+    assert len(retries)==int(oom_evidence)
+    if retries:assert retries[0]['reason']=='cgroup_oom_retry'
+    else:assert any(rec['status']=='failed' for rec in records)
+
+
+def queue_test_child(connection,options):
+    """Small real subprocess: exercise pipe draining, termination and respawn."""
+    while True:
+        try:job=connection.recv()
+        except EOFError:return
+        folder=Path(job['arguments']['output']);folder.mkdir()
+        time.sleep(.8)
+        (folder/'quality.json').write_text(json.dumps(dict(status='review',flags=['fixture'])))
+        connection.send(dict(status='complete',quality='review',flags=['fixture'],
+            result=dict(total_wall_s=.8,frax=None,acceptance_policy='common_pose_geometry_v1',fingerprint='test',files={})))
+
+
+def test_real_owned_process_is_requeued_without_leaking_children(setup,monkeypatch):
+    setup.mode='frax'
+    manifest=json.loads(setup.manifest.read_text());manifest['cases']=manifest['cases'][:2]
+    setup.manifest.write_text(json.dumps(manifest))
+    monkeypatch.setattr(batch,'child',queue_test_child)
+    class RealSlot(batch.Slot):
+        instances=[];closed_active=0
+        def __init__(self,options):super().__init__(options);self.instances.append(self)
+        def close(self):
+            if self.process is not None and self.process.is_alive():type(self).closed_active+=1
+            super().close()
+    def monitor():
+        alive=sum(s.process is not None and s.process.is_alive() for s in RealSlot.instances)
+        return snapshot(3 if alive>=2 and not RealSlot.closed_active else 60)
+    records=batch.run(setup,RealSlot,monitor)
+    assert all(rec['status']=='review' for rec in records)
+    assert sum(a['status']=='memory_retry' for rec in records for a in rec['attempts'])==1
+    assert all(s.process is None and s.connection is None for s in RealSlot.instances)
+
+
+def test_idle_process_is_reclaimed_before_any_active_attempt(setup,monkeypatch):
+    setup.mode='frax';setup.resource_mode='dynamic'
+    class Resident(FakeSlot):
+        fast_done=False;idle_closed=False
+        def start(self,*args):
+            self.polls=0;super().start(*args);self.pid=100+len(self.calls)
+            self.name=Path(args[0]['input']).stem
+        def poll(self):
+            self.polls+=1
+            if self.name!='easy' and self.polls<5:return None
+            result=super().poll()
+            if self.name=='easy' and result:type(self).fast_done=True
+            return result
+        def close(self):
+            if self.pid and self.result is None and type(self).fast_done:type(self).idle_closed=True
+            super().close();self.pid=None
+    monkeypatch.setattr(r,'process_memory',lambda pid:r.GIB if pid else 0)
+    def monitor():return snapshot(3 if Resident.fast_done and not Resident.idle_closed else 60)
+    records=batch.run(setup,Resident,monitor)
+    assert Resident.idle_closed
+    assert not any(a['status']=='memory_retry' for rec in records for a in rec['attempts'])
+    assert next(rec for rec in records if rec['case']=='easy')['status']=='accepted'
+
+
+def test_oversized_attempt_waits_for_more_capacity_instead_of_retry_loop(setup,monkeypatch):
+    setup.mode='frax';setup.resource_mode='dynamic'
+    manifest=json.loads(setup.manifest.read_text());manifest['cases']=manifest['cases'][:1]
+    setup.manifest.write_text(json.dumps(manifest))
+    class Large(FakeSlot):
+        cancellations=0;starts=0
+        def start(self,*args):
+            type(self).starts+=1;self.polls=0;super().start(*args);self.pid=123
+        def poll(self):
+            self.polls+=1
+            return None if self.polls<4 else super().poll()
+        def close(self):
+            if self.result is not None:type(self).cancellations+=1
+            super().close();self.pid=None
+    monkeypatch.setattr(r,'process_memory',lambda pid:17*r.GIB if pid else 0)
+    waiting=0
+    def monitor():
+        nonlocal waiting
+        if Large.running and not Large.cancellations:return snapshot(3)
+        if Large.cancellations and waiting<12:
+            waiting+=1
+            assert Large.starts==1, 'must not retry before the raised memory envelope fits'
+            return snapshot(20)
+        return snapshot(60)
+    records=batch.run(setup,Large,monitor)
+    assert waiting==12 and Large.starts==2 and Large.cancellations==1
+    assert records[0]['status']=='accepted'

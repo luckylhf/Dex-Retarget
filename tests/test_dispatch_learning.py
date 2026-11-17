@@ -56,3 +56,10 @@ def test_failed_or_unmeasured_jobs_never_lower_budgets(tmp_path):
     learner.complete(slot,item,{'status':'complete'},{'source':'soma'},100,policy)
     learner.complete(slot,item,{'status':'failed'},{'source':'soma'},100,policy)
     assert not learner.profiles
+
+
+def test_calibration_keeps_pure_v8_and_jax_resident_profiles_separate(tmp_path):
+    learner=MemoryLearning(tmp_path,{})
+    learner.profiles[learner.key('v8','lafan','pure')]=dict(completed_jobs=2)
+    assert learner.calibrated('v8','lafan','pure')
+    assert not learner.calibrated('v8','lafan','jax_hot')

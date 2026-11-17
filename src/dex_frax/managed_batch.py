@@ -16,6 +16,7 @@ from .cli import atomic_json,sha,static_identity
 from .resource_policy import ResourcePolicy
 from .dispatch import duration_seconds,route,priority,deduplicate
 from .memory_learning import MemoryLearning
+from .memory_queue import MemoryQueue,pressure,victim as memory_victim
 from .contract import DEFAULT_FOOT_CONTACT, conversion_contract
 from .dispatch import pipeline_stages,use_unified
 
@@ -199,13 +200,16 @@ def _run(args,slot_factory,monitor):
     started=time.monotonic();last_checkpoint=started;loop_seconds=0.;usage={};state='running';phase='prepare';active={};slots=[];last=0.;stopped=False;wait_since=None;last_reason=None
     records=[dict(case=c['id'],status='pending',attempts=[],selected_mode=None,selected_output=None,training_npz=None) for c in cases]
     snapshot=static_identity();previous=None
-    learning=MemoryLearning(res.state_root(),dict(identity=snapshot,execution=dict(iterations=args.iterations,
-        initial_iterations=args.initial_iterations,block_frames=getattr(args,'ik_block_frames',128))),not getattr(args,'no_memory_learning',False))
+    learning=MemoryLearning(res.state_root(),dict(identity=snapshot,execution=dict(
+        conversion=conversion_contract(args))),not getattr(args,'no_memory_learning',False))
     if resume:
         records,previous=restore(args,out,content,cases,snapshot)
         if not learning.profiles:
             learning.profiles=copy.deepcopy(previous.get('resources',{}).get('memory_learning',{}).get('profiles',{}))
     frames={};durations={};routes={};snap=monitor();priority_wait=None;observed=dict(max_active_workers=0,worker_pss_peak_bytes=0,total_worker_pss_peak_bytes=0,scope_usage_peak_bytes=0)
+    queue=[]
+    memory_queue=MemoryQueue(nworkers,(previous or {}).get('resources',{}).get('memory_queue'))
+    oom_kills=snap.get('cgroup_oom_kills',0)
     policy=dict(workers=nworkers,jit_compilers=1,memory_reserve_gib=reserve/res.GIB,
         resource_mode='dynamic' if dynamic else 'manual',memory_target_percent=getattr(args,'memory_target_percent',None),priority_lowered=priority_lowered,
         disk_reserve_gib=args.disk_reserve_gib,worker_peak_base_gib=args.worker_peak_gib,
@@ -233,6 +237,7 @@ def _run(args,slot_factory,monitor):
         policy['workers']=admission.value['workers']
         policy['memory_reserve_gib']=reserve/res.GIB
         policy['memory_learning']=learning.report()
+        policy['memory_queue']=memory_queue.report()
         if cpu_admission:
             measured=cpu_admission.report()
             policy['cpu_admission']=dict(measured,load_based_target_ignored=measured.get('target_workers'),
@@ -258,6 +263,7 @@ def _run(args,slot_factory,monitor):
             priority_wait=priority_wait,sampled_resource_peaks=observed,
             worker_pss_bytes=sum(measured),scheduler_loop_s=loop_seconds,
             checkpoint_interval_s=30.,checkpoint_age_s=now-last_checkpoint,
+            queued=len(queue),
             active=[dict(case=records[v['index']]['case'],mode=v['mode'],pid=s.pid,
                 estimated_peak_bytes=v['peak'],pss_bytes=usage.get(s,0),
                 telemetry=getattr(s,'telemetry',{})) for s,v in active.items()])
@@ -303,6 +309,17 @@ def _run(args,slot_factory,monitor):
         def enqueue(index,mode):
             nonlocal sequence
             heapq.heappush(queue,(priority((index,mode),durations),sequence,index,mode));sequence+=1
+        def defer(slot,item,reason):
+            i=item['index'];mode=item['mode'];record=records[i]
+            observed_peak=max(item.get('observed_peak',0),usage.get(slot,0)) or item['peak']
+            per=admission.value['stages'][mode]['bytes_per_output_frame']
+            memory_queue.defer(mode,cases[i]['source'],frames[i],per,observed_peak,len(active))
+            slot.close()
+            finish(record,dict(status='memory_retry',reason=reason),mode,item['folder'],out)
+            record['memory_retries']=record.get('memory_retries',0)+1
+            del active[slot];enqueue(i,mode)
+            print(cases[i]['id'],mode,'memory_retry',reason,flush=True)
+            save()
         for i,r in enumerate(records):
             if r['status'] in ('accepted','input_error','review','failed') or r.get('escalation',{}).get('stop'):continue
             for mode in routes[i]:
@@ -319,43 +336,63 @@ def _run(args,slot_factory,monitor):
             # CPU load is telemetry only. Fill every permitted slot; the OS
             # schedules competing work. Host/cgroup memory admission still gates starts.
             if cpu_admission:cpu_admission.sample([os.getpid()]+[s.pid for s in slots])
-            dispatch_limit=min(admission.value['workers'],nworkers)
+            dispatch_limit=min(admission.value['workers'],nworkers,memory_queue.limit)
             if stopped or stop_path.exists():state='interrupted';abort('interrupted');break
             if time.monotonic()-started>=args.budget:state='budget_exhausted';abort('budget_exhausted');break
             free=res.shutil.disk_usage(out).free
             if free<disk_floor:state='resource_exhausted';last_reason='disk_reserve';abort('resource_exhausted');break
-            if snap['available']<reserve//2:
-                state='resource_exhausted';last_reason='emergency_memory_floor';abort('resource_exhausted');break
             for slot,item in list(active.items()):
                 response=slot.poll()
                 if response is not None:
+                    if (response.get('error_type')=='WorkerExit' and response.get('exit_code')==-9
+                            and snap.get('cgroup_oom_kills',0)>oom_kills):
+                        defer(slot,item,'cgroup_oom_retry');continue
                     mode=item['mode'];i=item['index']
                     learning.observe(slot,item,usage.get(slot,0))
-                    learning.complete(slot,item,response,cases[i],frames[i],admission)
                     attempt=finish(records[i],response,mode,item['folder'],out,getattr(args,'v8_for_collision_only',False));del active[slot]
+                    if attempt['status']=='complete':
+                        learning.complete(slot,item,response,cases[i],frames[i],admission)
+                        memory_queue.complete()
                     print(cases[i]['id'],mode,attempt['status'],attempt.get('quality'),flush=True)
                     if records[i]['status']=='pending':
                         next_stage=routes[i].index(mode)+1
                         if next_stage<len(routes[i]):enqueue(i,routes[i][next_stage])
                         else:records[i]['status']='review' if any(a.get('quality')=='review' for a in records[i]['attempts']) else 'failed'
                     atomic_json(item['folder'].parent/'selection.json',records[i])
+            oom_kills=snap.get('cgroup_oom_kills',oom_kills)
             # Drain completions before the one O(workers) PSS sweep. Reuse this
             # sweep for every admission and report; never rescan all workers
             # once per newly filled slot (the old O(workers squared) hot path).
             usage={s:res.process_memory(s.pid) for s in slots}
             for slot,item in active.items():
                 learning.observe(slot,item,usage.get(slot,0))
-                item['peak']=learning.predict(item['mode'],cases[item['index']]['source'],getattr(slot,'telemetry',{}).get('cache_state','pure'),frames[item['index']],admission,stage=getattr(slot,'telemetry',{}).get('stage'),reuse=item.get('reuse',False))
+                i=item['index'];mode=item['mode']
+                item['observed_peak']=max(item.get('observed_peak',0),usage.get(slot,0),getattr(slot,'telemetry',{}).get('pss_bytes',0))
+                # Refine can revisit audit after repair; reserve the complete
+                # lifecycle rather than release a supposedly finished stage.
+                estimate=learning.predict(mode,cases[i]['source'],getattr(slot,'telemetry',{}).get('cache_state','pure'),frames[i],admission,reuse=item.get('reuse',False))
+                estimate=max(estimate,int(item['observed_peak']*1.1)+128*res.MIB)
+                item['peak']=memory_queue.peak(mode,cases[i]['source'],frames[i],admission.value['stages'][mode]['bytes_per_output_frame'],estimate)
             snap=monitor()
             victim=res.reclaim_idle(slots,active,usage,snap,reserve)
             if victim is not None:
                 victim.close();pool_stats['pressure_recycles']+=1
                 # Both snapshot and PSS must be refreshed together next loop.
                 continue
+            critical,waiting=pressure(snap,reserve)
+            if critical and active:
+                last_reason='memory_pressure_requeue';priority_wait=None
+                slot=memory_victim(active,usage)
+                defer(slot,active[slot],last_reason)
+                # Never credit released pages until a fresh snapshot/PSS sweep.
+                continue
+            if waiting:
+                last_reason='memory_pressure_wait';priority_wait=None
             # Do not credit reclaimed pages again while using this sweep's PSS.
             burst_headroom={k:snap[k] for k in ('available','cgroup_headroom')}
-            if queue and len(active)>=dispatch_limit:last_reason='cpu_capacity';priority_wait=None
-            while queue and len(active)<dispatch_limit:
+            dispatch_limit=min(admission.value['workers'],nworkers,memory_queue.limit)
+            if queue and not waiting and len(active)>=dispatch_limit:last_reason='cpu_capacity';priority_wait=None
+            while queue and not waiting and len(active)<dispatch_limit:
                 # Complete the entire Frax pass before any independent V8 work.
                 if args.mode=='auto' and queue[0][3]=='v8' and any(v['mode']=='frax' for v in active.values()):
                     last_reason='frax_stage_barrier';priority_wait=None
@@ -368,8 +405,13 @@ def _run(args,slot_factory,monitor):
                 # required reserve instead of immediately consuming it again.
                 for _,_,index,mode in queue[:1]:
                     cache=getattr(idle,'telemetry',{}).get('cache_state','pure') if idle and idle.pid else 'pure'
+                    if (learning.enabled and getattr(args,'profile',None) in ('fast','refine')
+                            and not learning.calibrated(mode,cases[index]['source'],cache)
+                            and any(v['mode']==mode and cases[v['index']]['source']==cases[index]['source'] for v in active.values())):
+                        last_reason='memory_calibration_wait';priority_wait=None;break
                     reuse_possible=False
                     peak=learning.predict(mode,cases[index]['source'],cache,frames[index],admission,reuse=reuse_possible)
+                    peak=memory_queue.peak(mode,cases[index]['source'],frames[index],admission.value['stages'][mode]['bytes_per_output_frame'],peak)
                     compiling=[(v['mode'],cases[v['index']]['source']) for s,v in active.items()
                         if getattr(s,'telemetry',{}).get('compile_possible',v['mode']!='v8')]
                     if mode!='v8' and not reuse_possible:compiling.append((mode,cases[index]['source']))
@@ -382,6 +424,7 @@ def _run(args,slot_factory,monitor):
                         inflight_growth_bytes=sum(max(0,p-u) for p,u in running),
                         available_headroom_bytes=min(snap['available']-reserve,snap['cgroup_headroom']))
                 if chosen is None:
+                    if last_reason=='memory_calibration_wait':break
                     victim=res.reclaim_idle(slots,active,usage,snap,reserve,idle,peak,shared)
                     if victim is not None:
                         victim.close();pool_stats['pressure_recycles']+=1
@@ -392,7 +435,7 @@ def _run(args,slot_factory,monitor):
                     idle=slot_factory(dict(options,cpu=cpus[len(slots)%len(cpus)]));slots.append(idle)
                 folder=out/c['id']/mode if args.mode=='auto' else out/c['id'];folder.parent.mkdir(parents=True,exist_ok=True)
                 if folder.exists():
-                    if not resume:raise FileExistsError(folder)
+                    if not resume and not r.get('memory_retries'):raise FileExistsError(folder)
                     archived=folder.with_name(folder.name+'.interrupted.'+str(time.time_ns()))
                     folder.rename(archived)
                     for attempt in r['attempts']:
@@ -410,10 +453,11 @@ def _run(args,slot_factory,monitor):
                 for key in burst_headroom:
                     burst_headroom[key]=min(burst_headroom[key],snap[key])
                     snap[key]=burst_headroom[key]
+                _,waiting=pressure(snap,reserve)
                 last_reason=None;wait_since=None;priority_wait=None
             if queue and not active:
                 wait_since=wait_since or time.monotonic()
-                if not dynamic and time.monotonic()-wait_since>=args.resource_wait:state='resource_exhausted';break
+                if not dynamic and args.resource_wait>0 and time.monotonic()-wait_since>=args.resource_wait:state='resource_exhausted';break
             else:wait_since=None
             loop_seconds=time.monotonic()-loop_started
             if time.monotonic()-last>=2:save(full=time.monotonic()-last_checkpoint>=30)

@@ -127,9 +127,42 @@ SMPL-X 输入先按 [输入规范](docs/INPUTS.md#smpl-x) 配置 `SMPLX_PYTHON` 
 .venv/bin/dex-frax batch manifest.json outputs/batch --budget 604800
 ```
 
-默认 `fast`，使用可用 CPU 并按内存准入控制并发。批次总预算默认 1800 秒，磁盘默认预留 80 GiB；请按任务规模设置 `--budget`、`--workers` 和 `--disk-reserve-gib`。停止与续跑方法，以及跑满 CPU 的 `refine` 完整参数，见批处理文档的[启动与预算](docs/BATCH.md#启动与预算)。
+默认 `fast`，使用可用 CPU 并按内存准入控制并发。批次总预算默认 1800 秒，磁盘默认预留 80 GiB；请按任务规模设置 `--budget`、`--workers` 和 `--disk-reserve-gib`。停止与续跑方法，以及以全部可用逻辑核为并发上限的 `refine` 参数，见批处理文档的[启动与预算](docs/BATCH.md#启动与预算)。
 
 首次批处理会编译 MuJoCo 模型与 JAX kernel 并写入 `~/.cache/dex-frax`（可用 `DEX_FRAX_STATE_DIR` 改），后续批次和同一进程里的后续动作复用这些产物；换机器架构、改依赖、改权重或改 `--ik-block-frames` 都会重新编译。分层与失效规则见 [模型与编译缓存](docs/BATCH.md#模型与编译缓存)。
+
+### 并发、内存预算与复用
+
+`--workers 32` 只设置 **32 个执行槽上限**，不保证同时运行 32 条动作；`auto` 使用当前 CPU 配额及亲和性允许的逻辑核数。实际并发受主机可用内存、cgroup 余量、在途任务增长和编译预留共同限制。修改内存估算不会降低求解器的真实内存用量。
+
+| 参数 | 默认值 | 实际作用 |
+|---|---|---|
+| `--worker-resident-gib` | `1` | Frax 每槽常驻预算基数，另加逐帧预算 |
+| `--worker-peak-gib` | `3.75` | 冷启动基数；超过 resident 的部分作为单独的编译预留，不逐槽重复相加 |
+| `--frame-memory-kib` | `32` | 每个 **50 Hz 输出帧** 的估算增量；`16` 对应 16,384 字节 |
+| `--memory-target-percent` | `90` | dynamic 模式下整台主机的占用目标，包括系统和其他程序 |
+| `--memory-reserve-gib` | 未指定 | dynamic 模式的额外最小保留；与占用目标推导的保留量取较大值；manual 默认保留 10 GiB |
+| `--memory-limit-gib` | 未指定 | 收紧 Linux 批次 cgroup 的内存硬上限，不预先分配这些内存 |
+
+未积累足够内存样本时，Frax 单槽预算为 `resident × GiB + 输出帧数 × frame_memory_kib × 1024`，编译另预留 `max(0, worker_peak − resident) × GiB`。例如 `--worker-peak-gib 2.1 --frame-memory-kib 16` 且未指定 resident 时，单槽基数仍是 **1 GiB**，编译预留为 **1.1 GiB**，不能按 `2.1 × 32` 推算。默认开启的内存学习会使用已完成动作的阶段峰值更新估算；运行时策略文件也可覆盖估算，详见 [资源设置](docs/BATCH.md#资源设置)。
+
+dynamic 模式实际主机保留量为 `max(总内存 × (100 − target) / 100, 显式 reserve)`，紧急底线为该保留量的一半。例如总内存约 62.4 GiB、target=95、reserve=2 时，实际保留约 **3.12 GiB**，紧急底线约 **1.56 GiB**。旧版 `emergency_memory_floor` 表示主机可用内存低于底线后整批停止，并不等于内核 OOM；当前批处理按下述流程降并发、排队恢复。
+
+**复用默认开启，无需额外开关。** 调度器保留热 worker、连续处理后续动作，复用进程内模型与 kernel；磁盘上的 MJB/JAX 编译缓存可跨进程复用编译产物。各 spawn 进程仍有独立的求解工作内存，缓存不等于跨进程共享整份 JAX 堆。内存学习仅改估算，不等于释放内存。提高预算会限制准入，降低预算可能放入过多任务，两者都不是实际节省内存的方法。
+
+是否满载应查看 `batch.running.json` 的活动任务、阶段、`worker_pss_bytes`、`sampled_resource_peaks` 和等待原因，并结合 CPU 采样；不要只看执行槽数或累加各进程 RSS。不同模式（旧 `auto` 与当前 `refine`）、动作长度、修复阶段及版本的峰值不能直接互套。新运行使用新输出目录；不要为解决内存问题删除已有转换结果或缓存。
+
+### 资源不足时自动排队
+
+批处理默认持续排队到资源恢复或总预算耗尽，普通内存不足不再直接终止整批：
+
+1. **先校准，再扩并发。** 开启内存学习时，同模式、参数及来源尚无足够样本，会依次跑完两条完整动作，包含审计、修复与导出，再按完整流程峰值增加并发。`fast` 与 `refine` 的学习记录隔离；不能用初解阶段的低占用替代完整峰值。
+2. **内存紧张先停派发。** 优先保存已完成结果、回收空闲 worker，运行中的任务继续；资源恢复后自动派发队列中的动作。
+3. **持续增长时只回退必要的单条任务。** 到达紧急底线或 cgroup 余量过低时，逐次释放一个在途 worker，将该动作标记为 `memory_retry` 放回队列，并提高预算、降低并发；其他任务及已完成结果保留。未完成尝试归档，该动作可能从头重算，不承诺任意帧断点续算。只有确有 cgroup OOM 计数且 worker 被 SIGKILL 时，才按内存问题自动重排；普通程序错误仍单独报告。
+
+状态文件增加 `queued` 和 `resources.memory_queue`，等待原因区分 `memory_calibration_wait`、`memory_pressure_wait`、`priority_head_wait:memory_reserve`。默认 `--resource-wait 0` 表示等待受总 `--budget` 限制；manual 模式显式设置正值才限定空闲等待时间。`--no-memory-learning` 同时跳过冷启动校准，须自行给出覆盖审计与修复峰值的预算，但仍保留压力回收和重排。
+
+总预算、用户 STOP/信号、磁盘保护、身份校验与真实系统硬限制仍有效；若操作系统连调度器也杀掉，需要核验后 `--resume`。新调度逻辑不会热替换已经运行的旧进程，也不改变求解参数或验收门槛。详细边界见 [批处理说明](docs/BATCH.md#内存不足时的队列与恢复)。
 
 ## 检查范围
 

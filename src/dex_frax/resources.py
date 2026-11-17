@@ -97,7 +97,14 @@ def memory():
                 reclaimable=min(current,cgroup_clean_file_cache(folder))
                 headroom=min(headroom,max(0,maximum-current+reclaimable));limit=min(limit or maximum,maximum)
                 if scope_peak is None and (folder/'memory.peak').exists():scope_peak=int((folder/'memory.peak').read_text())
-        return dict(total=total,available=available,cgroup_headroom=headroom,cgroup_limit=limit,cgroup_peak=scope_peak)
+        oom_kills=0
+        ancestors=cgroup_ancestors()
+        if ancestors:
+            try:
+                events=dict(line.split() for line in (ancestors[0]/'memory.events').read_text().splitlines())
+                oom_kills=int(events.get('oom_kill',0))
+            except (OSError,ValueError):pass
+        return dict(total=total,available=available,cgroup_headroom=headroom,cgroup_limit=limit,cgroup_peak=scope_peak,cgroup_oom_kills=oom_kills)
     if sys.platform=='darwin':
         import re
         total=int(subprocess.check_output(['sysctl','-n','hw.memsize'],text=True))
@@ -138,6 +145,9 @@ def peak_bytes(frames,base_gib=4.,bytes_per_frame=65536):
     # Conservative JAX baseline, not the old TRF/fork 256 MiB estimate.
     return int(base_gib*GIB+frames*bytes_per_frame)
 
+def cgroup_floor(snapshot):
+    return min(256*MIB,max(32*MIB,int(snapshot.get('cgroup_limit') or GIB)//100))
+
 def can_admit(snapshot,reserve,free_disk,disk_floor,running,candidate_peak,candidate_used=0,shared_reserve=0):
     if free_disk<disk_floor:return False,'disk_reserve'
     headroom=min(snapshot['available']-reserve,snapshot['cgroup_headroom'])
@@ -162,7 +172,7 @@ def reclaim_idle(slots,active,usage,snapshot,reserve,candidate=None,candidate_pe
     Never credit reclaimed memory until a fresh monitor/PSS sweep observes it.
     """
     headroom=min(snapshot['available']-reserve,snapshot['cgroup_headroom'])
-    pressure=headroom<0
+    pressure=headroom<0 or snapshot['cgroup_headroom']<cgroup_floor(snapshot)
     incremental=shared+max(0,candidate_peak-usage.get(candidate,0))
     if not pressure and (candidate is None or headroom>=incremental):return None
     idle=[s for s in slots if s not in active and s.pid and usage.get(s,0)>0
@@ -211,8 +221,8 @@ def contain_linux(args):
     # Explicit MemoryMax is a backstop, not an allocation. Host admission still
     # keeps the full reserve; even the hard ceiling keeps the emergency floor.
     ceiling=snapshot['total']-(reserve//2 if hard_limit is not None else reserve)
-    maximum=(min(ceiling,int(hard_limit*GIB)) if hard_limit is not None else
-             (ceiling if dynamic_mode(args) else min(ceiling,snapshot['available']-reserve,snapshot['cgroup_headroom'])))
+    maximum=min(ceiling,int(hard_limit*GIB)) if hard_limit is not None else ceiling
+    if snapshot.get('cgroup_limit') is not None:maximum=min(maximum,snapshot['cgroup_limit'])
     marker=os.environ.get('DEX_FRAX_RESOURCE_SCOPE')
     if marker:
         # An environment variable alone must not bypass containment.
@@ -222,8 +232,10 @@ def contain_linux(args):
         if snapshot['cgroup_limit']>ceiling:raise RuntimeError('Resource scope exceeds host reserve')
         if hard_limit is not None and snapshot['cgroup_limit']>hard_limit*GIB:raise RuntimeError('Resource scope exceeds requested limit')
         return None
-    startup_room=min(maximum,snapshot['cgroup_headroom']) if dynamic_mode(args) else min(maximum,snapshot['available']-reserve,snapshot['cgroup_headroom'])
-    if startup_room<peak_bytes(1,args.worker_peak_gib) or snapshot['available']<reserve//2:raise RuntimeError('Insufficient memory for even one protected worker')
+    startup_room=min(maximum,snapshot['available'],snapshot['cgroup_headroom'])
+    # Establish containment and let the scheduler queue work even when a worker
+    # cannot fit yet. Do not bypass inherited limits or weaken the hard cap.
+    if startup_room<64*MIB:raise RuntimeError('Insufficient memory for the batch coordinator')
     if not shutil.which('systemd-run'):raise RuntimeError('Parallel Linux batch requires systemd-run user memory containment')
     unit='dex-frax-'+uuid.uuid4().hex+'.scope'
     command=['systemd-run','--user','--scope','--quiet','--unit='+unit,
