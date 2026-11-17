@@ -62,6 +62,7 @@ def test_flight_retains_source_feet_and_releases_ground_tasks_only():
         np.testing.assert_array_equal(foot['contact'], [1, 0, 0, 0, 1])
         np.testing.assert_array_equal(foot['phase'], [1, 0, 0, 0, 1])
         assert [(s['start'], s['end']) for s in foot['segments']] == [(0, 1), (4, 5)]
+        json.dumps(foot['segments'], allow_nan=False)
         for key in ('foot_flat_confidence', 'foot_roll_level_weight', 'ground_contact_confidence'):
             np.testing.assert_array_equal(foot[key], [1, 0, 0, 0, 1])
         for key, value in foot.items():
@@ -91,6 +92,7 @@ def test_retiming_keeps_flight_free_of_interpolated_ground_targets():
         assert not foot['contact'][flight].any()
         np.testing.assert_array_equal(foot['foot_target_p'][flight], foot['raw_foot_p'][flight])
         np.testing.assert_array_equal(foot['foot_target_r'][flight], foot['raw_foot_r'][flight])
+        json.dumps(foot['segments'], allow_nan=False)
 
 
 @pytest.mark.parametrize('source_flight', [False, True, None])
@@ -146,6 +148,7 @@ def test_preparation_preserves_flight_at_takeoff_and_landing(policy):
     assert flight[25:55].all() and not flight[:20].any() and not flight[60:].any()
     for foot in targets['sides'].values():
         assert foot['contact'][:20].any() and foot['contact'][60:].any()
+        json.dumps(foot['segments'], allow_nan=False)
         assert not foot['contact'][flight].any()
         np.testing.assert_array_equal(foot['foot_target_p'][flight], foot['raw_foot_p'][flight])
         np.testing.assert_array_equal(foot['foot_target_r'][flight], foot['raw_foot_r'][flight])

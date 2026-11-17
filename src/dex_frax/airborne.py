@@ -37,7 +37,7 @@ def preserve_targets(targets):
         for segment in foot.get('segments', []):
             a, b = segment['start'], segment['end']
             for start, end in runs(~mask[a:b]):
-                part = dict(segment, start=a+start, end=a+end)
+                part = dict(segment, start=int(a+start), end=int(a+end))
                 if start:
                     part.pop('continuous_from_previous', None)
                 segments.append(part)
