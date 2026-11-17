@@ -182,4 +182,5 @@ def prepare(t,robot,cfg,enabled=True):
         v.update(foot_target_p=pos,foot_target_r=r,contact=weights,phase=labels,anchors=anchors,pivots=pivots,
                  segments=segments,raw_foot_p=rawpos,raw_foot_r=rawr,heel_speed=hs,toe_speed=ts)
     from .multicontact import prepare as prepare_body_contacts
-    return prepare_body_contacts(t,robot,cfg,enabled)
+    from ..airborne import preserve_targets
+    return preserve_targets(prepare_body_contacts(t,robot,cfg,enabled))

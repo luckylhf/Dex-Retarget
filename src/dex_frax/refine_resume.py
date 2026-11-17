@@ -18,7 +18,8 @@ def verify(folder,identity,recheck=False):
     old=json.loads((folder/'identity.json').read_text())
     if recheck:
         initial={'ik.py','pelvis_priority.py','kinematics.py','shoulder_reference.py',
-                 'frax_foot_constraints.py','frax_arm_constraints.py'}
+                 'frax_foot_constraints.py','frax_arm_constraints.py','airborne.py',
+                 'v8/contacts.py','v8/multicontact.py','retiming.py'}
         safety={'acceptance.py','audit_cache.py','support_quality.py','temporal_quality.py','ankle_collision.py',
                 'v8/audit.py','v8/anatomy.py','v8/robot.py','v8/self_collision.py'}
         names=set(old['implementation'])|set(identity['implementation'])

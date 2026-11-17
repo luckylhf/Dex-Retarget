@@ -7,7 +7,7 @@ from functools import lru_cache
 @lru_cache(maxsize=1)
 def audit_implementation():
     root=Path(__file__).parent
-    return {name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ("acceptance.py","quality_pose.py","quality_v8.py","v8/audit.py","v8/self_collision.py","foot_collision.py","ankle_collision.py","support_quality.py","temporal_quality.py")}
+    return {name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ("acceptance.py","quality_pose.py","quality_v8.py","v8/audit.py","v8/self_collision.py","foot_collision.py","ankle_collision.py","support_quality.py","temporal_quality.py","airborne.py")}
 
 
 def solver_history(report):

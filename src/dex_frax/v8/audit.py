@@ -64,7 +64,7 @@ def audit(path,write=True,cache=None,changed=None):
     flat_tilt=values['flat_tilt'];flat_heel=values['flat_heel']
     root_orientation=values['root_orientation'];torso_orientation=values['torso_orientation'];torso_up=values['torso_up']
     body_heights=values['body_heights'];body_errors=values['body_errors']
-    contact_vel={s:[] for s in rob.sides};floating=longest=0
+    contact_vel={s:[] for s in rob.sides}
     root_speed=np.linalg.norm(np.gradient(data['root_pos'].astype(float),1/fps,axis=0),axis=1)
     for i in (range(*changed) if valid else range(n)):
         rob.set(np.r_[data['root_pos'][i],q[i]],rr[i])
@@ -102,10 +102,11 @@ def audit(path,write=True,cache=None,changed=None):
                 anchor=dg['body_'+name+'_anchors'][i]
                 body_errors[name]['fixed_xy_cm'][i]=np.linalg.norm(point[:2]-anchor[:2])*100
     cache['frames']=values
-    for i,all_low in enumerate(body_heights):
-        unexplained=(all_low>.05 if 'source_expected_contact' in dg else min(errors[side]['sole_height_cm'][i] for side in rob.sides)>5) and root_speed[i]<.2
-        floating=floating+1 if unexplained else 0
-        longest=max(longest,floating)
+    from ..airborne import floating_report
+    source_contacts = 'source_expected_contact' in dg or 'source_airborne' in dg
+    clearance = body_heights if source_contacts else np.minimum.reduce(
+        [errors[side]['sole_height_cm'] for side in rob.sides])/100
+    floating = floating_report(clearance, root_speed, fps, dg)
     def present(items):return [v for v in items if v is not None]
     segments={}
     for s,g in rob.sides.items():
@@ -127,11 +128,12 @@ def audit(path,write=True,cache=None,changed=None):
         'root_step_cm':stats(np.linalg.norm(np.diff(data['root_pos'],axis=0),axis=1)*100),
         'root_target_difference_cm':stats(np.linalg.norm(data['root_pos']-dg['root_target'],axis=1)*100),
         'root_orientation_deg':stats(root_orientation),'torso_orientation_deg':stats(torso_orientation),
-        'torso_up_deg':stats(torso_up),'stationary_floating_longest_seconds':longest/fps,
+        'torso_up_deg':stats(torso_up),'stationary_floating_longest_seconds':floating['longest_seconds'],
+        'floating_audit':floating,
         'sides':{},'contact_segments':segments,
         'minimum_body_visual_cm':float(min(body_heights)*100),
         'body_penetration_frames_below_minus_2cm':int(np.sum(np.asarray(body_heights)<-.02)),
-        'floating_basis':'all-body surface; sustained stationary clearance, not feet-only' if 'source_expected_contact' in dg else 'legacy feet-only',
+        'floating_basis':'all-body surface; source-airborne frames excluded from sustained stationary clearance' if source_contacts else 'legacy feet-only; no source-airborne evidence',
         'body_contacts':{name:{k:stats(present(v)) for k,v in values.items()} for name,values in body_errors.items()}}
     for s,d in errors.items():
         ce=np.asarray(present(contact_xyz[s]));g=rob.sides[s]

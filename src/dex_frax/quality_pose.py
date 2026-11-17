@@ -61,6 +61,7 @@ def quality(pkl, meta, audit):
                 root_speed_max_m_s=float(speed.max()), root_angular_speed_max_rad_s=float(omega.max()),
                 source_pose_audit={k:audit[k] for k in ('root_orientation_deg','torso_orientation_deg','torso_up_deg')},
                 stationary_floating_longest_seconds=audit['stationary_floating_longest_seconds'],
+                floating_audit=audit.get('floating_audit'),
                 support_constraint_failures=meta['support_constraint_failures'],
                 initialization='whole-sequence solve; no GMR priming or table-retry semantics',
                 dynamic_status='not_tested_by_controller')

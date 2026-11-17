@@ -4,12 +4,16 @@
 |---|---|
 | 完整动作基线 | 2026-11-11 v26 |
 | Python 包版本 | 0.8.3 |
-| 求解策略 | `frax_fast_persistent_window_refine_v27` |
-| 验收策略 | `scoped_collision_support_temporal_v7` |
+| 求解策略 | `frax_fast_persistent_window_refine_v28` |
+| 验收策略 | `scoped_collision_support_temporal_v8` |
 | 默认模式 | `fast` |
 | 完整动作验证模式 | `refine`，启用 `--allow-local-slowdown` |
 
 机器可读索引见 [CURRENT_VERSION.json](../CURRENT_VERSION.json)。
+
+## 0.8.3 腾空处理修订
+
+接入源动作逐帧腾空标记，腾空时保留未吸附地面的脚部目标，停用地面支撑吸附及其过渡修正；静止悬浮检查排除这些帧。穿地、自碰撞和速度检查继续执行。求解与验收策略分别更新为 v28、v8，以区分旧报告；数值门槛未变，悬浮检查的适用帧发生变化。验证覆盖目标准备、起落边界、减速和导出检查；下述完整动作基线仍为旧策略结果，不表示新策略已完成整库复验。见[腾空与地面支撑](PIPELINE.md#腾空与地面支撑)。
 
 ## 0.8.3 调度修订
 

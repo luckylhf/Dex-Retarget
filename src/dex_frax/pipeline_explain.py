@@ -74,7 +74,9 @@ def flag_info(flag):
         return dict(flag=raw, category='missing_check', action='补足独立检查；缺少检查不等于无问题')
     if any(v in raw for v in ('collision', 'penetration', 'joint_limit', 'velocity', 'nonfinite')):
         return dict(flag=raw, category='safety', action='检查对应几何、模型限位或速度；候选必须通过原安全验收')
-    if any(v in raw for v in ('contact', 'support', 'floating')):
+    if 'floating' in raw:
+        return dict(flag=raw, category='contact', action='核对源腾空标记、原动作与场景支撑；仅源动作无法解释的悬浮需要修复，不直接压向地面')
+    if any(v in raw for v in ('contact', 'support')):
         return dict(flag=raw, category='contact', action='核对接触证据、地面与支撑；使用接触修复模块')
     if 'torso' in raw or 'pelvis' in raw:
         return dict(flag=raw, category='body_shape', action='先查预处理/躯干/初始分支，不能靠手臂避碰补偿错误腰姿')
