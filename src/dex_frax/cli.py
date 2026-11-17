@@ -245,9 +245,10 @@ def main():
     batching.add_argument('--disk-reserve-gib',type=float,default=80.)
     batching.add_argument('--worker-peak-gib',type=float,default=3.75,help='Frax cold baseline; excess over resident budget is reserved once for the compiler')
     batching.add_argument('--worker-resident-gib',type=float,default=1.,help='Frax resident baseline, plus per-frame memory')
+    batching.add_argument('--completion-worker-gib',type=float,help='Full-lifecycle resident budget for one protected worker, plus length increment; default cold baseline')
     batching.add_argument('--frame-memory-kib',type=float,default=32.,help='Initial per-output-frame memory budget, hot-reloadable per stage')
     batching.add_argument('--resource-policy',type=Path,help='Live resource-only JSON; defaults to output/resource_policy.json, checked every 2 seconds')
-    batching.add_argument('--no-memory-learning',action='store_true',help='Use configured full-motion estimates; skip learned estimates and cold-start calibration')
+    batching.add_argument('--no-memory-learning',action='store_true',help='Use configured length and stage estimates without learning')
     batching.add_argument('--ik-block-frames',type=int,default=128,help='Fixed IK execution block length, with carried state across blocks')
     batching.add_argument('--resume',action='store_true',help='Verify and retain completed attempts in an interrupted batch; retry unfinished stages')
     batching.add_argument('--resource-wait',type=float,default=0.,help='Manual-mode idle resource wait limit; 0 waits until the total batch budget')
@@ -314,6 +315,8 @@ def main():
         values=[args.iterations,args.initial_iterations,args.budget,args.memory_target_percent,args.disk_reserve_gib,args.worker_peak_gib,args.worker_resident_gib,args.frame_memory_kib,args.ik_block_frames,args.v8_worker_peak_gib]+[getattr(args,m+'_timeout') for m in ('frax','v8') if getattr(args,m+'_timeout') is not None]+([args.memory_limit_gib] if args.memory_limit_gib is not None else [])+([args.memory_reserve_gib] if args.memory_reserve_gib is not None else [])
         if not math.isfinite(args.resource_wait) or args.resource_wait<0:
             parser.error('Resource wait must be finite and nonnegative')
+        if args.completion_worker_gib is not None and (not math.isfinite(args.completion_worker_gib) or args.completion_worker_gib<=0):
+            parser.error('Completion worker budget must be finite and positive')
         if any(not math.isfinite(v) or v<=0 for v in values):
             parser.error('Batch iteration counts and budgets must be finite and positive')
         if args.worker_resident_gib>args.worker_peak_gib:parser.error('Resident memory cannot exceed cold-worker peak')

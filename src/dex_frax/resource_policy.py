@@ -17,6 +17,7 @@ class ResourcePolicy:
         resident = getattr(args, 'worker_resident_gib', args.worker_peak_gib)
         per_frame = int(getattr(args, 'frame_memory_kib', 32)*1024)
         self.value = dict(schema=1, workers=ceiling,memory_learning=not getattr(args,'no_memory_learning',False),
+            completion_worker_gib=getattr(args,'completion_worker_gib',None),phase_bases_gib={},
             compile_extra_gib=max(0., args.worker_peak_gib-resident),
             stages=dict(frax=dict(base_gib=resident, bytes_per_output_frame=per_frame),
                 v8=dict(base_gib=getattr(args, 'v8_worker_peak_gib', args.worker_peak_gib), bytes_per_output_frame=per_frame)))
@@ -32,13 +33,19 @@ class ResourcePolicy:
 
     def validate(self, value):
         required={'schema', 'workers', 'compile_extra_gib', 'stages'}
-        if not required.issubset(value) or set(value)-required-{'memory_learning'} or value['schema'] != 1:
+        if not required.issubset(value) or set(value)-required-{'memory_learning','completion_worker_gib','phase_bases_gib'} or value['schema'] != 1:
             raise ValueError('Invalid resource policy schema')
         if type(value.get('memory_learning',True)) is not bool:raise ValueError('Invalid memory learning flag')
         if type(value['workers']) is not int or not 1 <= value['workers'] <= self.ceiling:
             raise ValueError('Policy workers exceed the startup ceiling')
         def number(v, lower, upper):
             return type(v) in (int, float) and math.isfinite(v) and lower <= v <= upper
+        if value.get('completion_worker_gib') is not None and not number(value['completion_worker_gib'],.25,4096.):
+            raise ValueError('Invalid completion worker budget')
+        phases=value.get('phase_bases_gib',{})
+        from .resource_events import STAGES
+        if not isinstance(phases,dict) or set(phases)-set().union(*STAGES.values()) or not all(number(v,.25,4096.) for v in phases.values()):
+            raise ValueError('Invalid phase memory budgets')
         if not number(value['compile_extra_gib'], 0., 16.):
             raise ValueError('Invalid shared compiler budget')
         if set(value['stages']) != {'frax', 'v8'}:
@@ -76,7 +83,20 @@ class ResourcePolicy:
 
     def peak(self, mode, frames):
         stage = self.value['stages'][mode]
-        return resources.peak_bytes(frames, stage['base_gib'], stage['bytes_per_output_frame'])
+        base=max(stage['base_gib'],max(self.value.get('phase_bases_gib',{}).values(),default=0))
+        return resources.peak_bytes(frames, base, stage['bytes_per_output_frame'])
+
+    def stage_peak(self,mode,frames,phase):
+        stage=self.value['stages'][mode]
+        base=self.value.get('phase_bases_gib',{}).get(phase,stage['base_gib'])
+        return resources.peak_bytes(frames,base,stage['bytes_per_output_frame'])
+
+    def completion_peak(self,mode,frames):
+        stage=self.value['stages'][mode]
+        base=self.value.get('completion_worker_gib')
+        if base is None:base=stage['base_gib']+(self.value['compile_extra_gib'] if mode=='frax' else 0)
+        base=max(base,max(self.value.get('phase_bases_gib',{}).values(),default=0))
+        return max(self.peak(mode,frames),resources.peak_bytes(frames,base,stage['bytes_per_output_frame']))
 
     def shared(self, modes):
         needed=any(m is True or (isinstance(m,str) and m == 'frax') for m in modes)

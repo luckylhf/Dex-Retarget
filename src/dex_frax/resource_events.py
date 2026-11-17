@@ -4,6 +4,7 @@ from .resources import process_memory
 import os
 
 _sink=None
+_gate=None
 _jax_hot=False
 _stage='loading'
 STAGES={'frax':('loading','preprocessing','initial','fast_refinement','local_repair','export_check','audit','export'),
@@ -20,12 +21,22 @@ def set_sink(sink):
     global _sink
     _sink=sink
 
+def set_gate(gate):
+    global _gate
+    _gate=gate
+
+# waiting_compile is BEFORE CompileLease acquisition. Never block on the
+# ik_prepare/ik_compile events emitted while that shared lock is held.
+SAFE_GATES=set().union(*STAGES.values())-{'idle'} | {'waiting_compile'}
+
 
 def phase(name,compile_possible=False,**details):
     global _jax_hot,_stage
     if name in set().union(*STAGES.values()) or name=='idle':_stage=name
     if name=='ik_solve':_jax_hot=True
-    if _sink is not None:
-        _sink(dict(phase=name,stage=_stage,compile_possible=compile_possible,
+    if _sink is None and _gate is None:return
+    event=dict(phase=name,stage=_stage,compile_possible=compile_possible,
             cache_state='jax_hot' if _jax_hot else ('jax_imported' if 'jax' in sys.modules else 'pure'),
-            pss_bytes=process_memory(os.getpid()),**details))
+            pss_bytes=process_memory(os.getpid()),**details)
+    if _sink is not None:_sink(event)
+    if _gate is not None and name in SAFE_GATES:_gate(event)

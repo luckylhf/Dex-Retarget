@@ -35,18 +35,25 @@ def load_manifest(path, contents=None):
     return validated
 
 
-def _worker(connection):
+def _worker(connection,initialize=None):
     from .cli import convert
     from .input_errors import MotionInputError
-    from .resource_events import set_sink,phase
+    from .resource_events import set_sink,set_gate,phase
     set_sink(lambda event:connection.send(dict(resource_event=event)))
+    def gate(event):
+        connection.send(dict(memory_request=event))
+        if connection.recv()!=dict(memory_grant=True):
+            raise RuntimeError('Invalid stage memory grant')
     while True:
         try:job=connection.recv()
         except EOFError:break
         if job is None:break
         begin=time.perf_counter()
         try:
+            set_gate(gate if job.get('stage_memory',False) else None)
             phase('loading',compile_possible=job['arguments'].get('mode','v8')!='v8' and not job['arguments'].get('require_initial_reuse',False))
+            if initialize is not None:
+                initialize();initialize=None
             if sha(job['input'])!=job['input_sha256']:
                 raise MotionInputError('Input changed after manifest validation')
             with Path(job['log']).open('w') as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):

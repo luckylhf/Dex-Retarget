@@ -46,10 +46,11 @@ def pressure(snapshot, reserve):
     return critical, snapshot['available'] < reserve or critical
 
 
-def victim(active, usage):
+def victim(active, usage, protected=None):
     # Drain results first. Prefer restarting early work over discarding a nearly
     # exported motion; within a stage release the largest actual allocation.
     early = {'loading', 'preprocessing', 'initial'}
-    return max(active, key=lambda slot: (
+    candidates=[s for s in active if s is not protected] or list(active)
+    return max(candidates, key=lambda slot: (
         getattr(slot, 'telemetry', {}).get('stage', 'initial') in early,
         usage.get(slot, 0), getattr(slot, 'started', 0)), default=None)

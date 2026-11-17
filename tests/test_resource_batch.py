@@ -432,7 +432,7 @@ def test_completed_export_is_drained_before_low_memory_recovery(setup):
     assert not any(a['status']=='memory_retry' for rec in records for a in rec['attempts'])
 
 
-def test_cold_start_waits_for_two_full_completions_before_filling_slots(setup):
+def test_cold_start_fills_slots_with_one_completion_reserve(setup):
     setup.mode='frax';setup.profile='refine'
     class Observed(FakeSlot):
         concurrency=[]
@@ -442,9 +442,93 @@ def test_cold_start_waits_for_two_full_completions_before_filling_slots(setup):
             self.phase_peaks={'audit|jax_hot':r.GIB}
             self.concurrency.append(type(self).running)
     records=batch.run(setup,Observed,lambda:snapshot(60))
-    assert Observed.concurrency[:2]==[1,1]
-    assert max(Observed.concurrency[2:])>1
+    assert Observed.concurrency[0]==1
+    assert max(Observed.concurrency)>1
     assert all(rec['status']!='resource_exhausted' for rec in records)
+
+
+def permit_test_child(connection,options):
+    from dex_frax import cli
+    from dex_frax.cascade import _worker
+    from dex_frax.resource_events import phase
+    def convert(args):
+        folder=Path(args.output)
+        phase('initial')
+        folder.mkdir()
+        phase('audit',required_peak_bytes=3*r.GIB)
+        (folder/'audit_started').write_text('yes')
+        time.sleep(.3)
+        phase('export')
+        (folder/'quality.json').write_text(json.dumps(dict(status='review',flags=['fixture'])))
+        return dict(quality='review',flags=['fixture'],total_wall_s=.3,frax=None,
+                    acceptance_policy='common_pose_geometry_v1',fingerprint='test',files={})
+    cli.convert=convert
+    _worker(connection,initialize=lambda:None)
+
+
+def test_real_stage_wait_preserves_process_and_releases_after_completion(setup,monkeypatch):
+    setup.mode='frax';setup.profile='refine';setup.worker_resident_gib=1.;setup.completion_worker_gib=4.
+    setup.frame_memory_kib=0.;setup.no_memory_learning=True
+    manifest=json.loads(setup.manifest.read_text());manifest['cases']=manifest['cases'][:2]
+    setup.manifest.write_text(json.dumps(manifest))
+    setup.resource_policy=setup.manifest.parent/'phases.json'
+    setup.resource_policy.write_text(json.dumps(dict(schema=1,workers=32,memory_learning=False,
+        completion_worker_gib=4.,compile_extra_gib=2.,phase_bases_gib={},
+        stages={'frax':dict(base_gib=1.,bytes_per_output_frame=0),'v8':dict(base_gib=1.,bytes_per_output_frame=0)})))
+    monkeypatch.setattr(batch,'child',permit_test_child)
+    monkeypatch.setattr(r,'process_memory',lambda _:0)
+    class RealSlot(batch.Slot):
+        completed=[];audit_grants=[]
+        def start(self,job,timeout):self.name=Path(job['input']).stem;super().start(job,timeout)
+        def poll(self):
+            result=super().poll()
+            if result and result['status']=='complete':self.completed.append(self.name)
+            return result
+        def grant_memory(self):
+            if self.memory_request.get('stage')=='audit':
+                if self.name=='rescue':assert 'easy' in self.completed
+                self.audit_grants.append(self.name)
+            super().grant_memory()
+    records=batch.run(setup,RealSlot,lambda:snapshot(17))
+    assert all(rec['status']=='review' for rec in records)
+    assert RealSlot.audit_grants==['easy','rescue']
+    assert records[1]['attempts'][0]['memory_wait_s']>=.2
+    assert not any(a['status']=='memory_retry' for rec in records for a in rec['attempts'])
+
+
+def test_blocked_stage_is_not_counted_as_compute_timeout(setup,monkeypatch):
+    monkeypatch.setattr(batch,'child',permit_test_child)
+    source=setup.manifest.parent/'easy.bvh'
+    slot=batch.Slot({})
+    folder=setup.manifest.parent/'waiting';folder.parent.mkdir(exist_ok=True)
+    job=dict(input=str(source),input_sha256=sha(source),log=str(folder.parent/'waiting.log'),
+        arguments=dict(input=str(source),output=str(folder),mode='frax'),stage_memory=True)
+    slot.start(job,10.)
+    try:
+        deadline=time.monotonic()+10
+        while slot.memory_request is None and time.monotonic()<deadline:
+            assert slot.poll() is None;time.sleep(.005)
+        assert slot.memory_request is not None
+        slot.timeout=time.monotonic()-slot.started+.05
+        time.sleep(.15)
+        assert slot.poll() is None and slot.pid is not None
+        assert not folder.exists()
+        assert slot.memory_wait_s()>=.15
+    finally:slot.close()
+
+
+def test_stage_batch_keeps_cpu_slot_ceiling(setup):
+    setup.mode='frax';setup.profile='refine';setup.worker_resident_gib=.25
+    setup.worker_peak_gib=.5;setup.completion_worker_gib=2.
+    cases=[]
+    for index in range(40):
+        name=f'cpu{index:02d}';p=setup.manifest.parent/(name+'.bvh')
+        p.write_text(f'Frames: 50\nFrame Time: 0.02\n{index}')
+        cases.append(dict(id=name,input=str(p),input_sha256=sha(p),source='lafan'))
+    setup.manifest.write_text(json.dumps(dict(cases=cases)))
+    records=batch.run(setup,FakeSlot,lambda:snapshot(60))
+    assert FakeSlot.peak==32
+    assert all(record['status']=='review' for record in records)
 
 
 @pytest.mark.parametrize('oom_evidence',[False,True])

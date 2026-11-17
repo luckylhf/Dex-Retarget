@@ -46,12 +46,21 @@ class MemoryLearning:
         profile=self.profiles.get(self.key(mode,source,cache),{})
         return profile.get('completed_jobs',0)>=2
 
+    def stage_peak(self,mode,source,cache,frames,policy,stage):
+        fallback=policy.stage_peak(mode,frames,stage)
+        profile=self.profiles.get(self.key(mode,source,cache),{})
+        samples=profile.get('stage_samples',{}).get(stage,[])
+        if not self.enabled or not samples:return fallback
+        estimate=envelope(samples,frames,policy.value['stages'][mode]['bytes_per_output_frame'])
+        return max(fallback,estimate) if profile.get('stage_jobs',{}).get(stage,0)<2 else estimate
+
     def predict(self,mode,source,cache,frames,policy,stage=None,reuse=False):
         fallback=policy.peak(mode,frames)
         profile=self.profiles.get(self.key(mode,source,cache,reuse))
-        if not self.enabled or not profile or profile['completed_jobs']<2:return fallback
+        if not self.enabled or not profile or not profile.get('samples'):return fallback
         per=policy.value['stages'][mode]['bytes_per_output_frame']
         whole=envelope(profile['samples'],frames,per)
+        if profile['completed_jobs']<2:return max(fallback,whole)
         if stage is None:return whole
         estimates=[]
         for phase in remaining(mode,stage):
@@ -73,8 +82,9 @@ class MemoryLearning:
     def compiler_extra(self,mode,source,policy):
         fallback=int(policy.value['compile_extra_gib']*GIB)
         profile=self.profiles.get(self.key(mode,source,'jax_hot'),{})
-        if not self.enabled or profile.get('cold_jobs',0)<2:return fallback
-        return max(256*MIB,profile['compile_extra_peak_bytes']+128*MIB)
+        if not self.enabled or not profile.get('cold_jobs',0):return fallback
+        estimate=max(256*MIB,profile['compile_extra_peak_bytes']+128*MIB)
+        return max(fallback,estimate) if profile['cold_jobs']<2 else estimate
 
     def complete(self,slot,item,response,case,frames,policy):
         if not self.enabled or response['status']!='complete':return
@@ -103,4 +113,4 @@ class MemoryLearning:
             self.path.parent.mkdir(parents=True,exist_ok=True);atomic_json(self.path,self.profiles)
 
     def report(self):return dict(enabled=self.enabled,path=str(self.path),minimum_completed_jobs=2,
-        margin_mib=64,compile_margin_mib=128,policy='remaining_stage_upper_envelope_v2',profiles=self.profiles)
+        first_sample_can_raise=True,margin_mib=64,compile_margin_mib=128,policy='length_stage_upper_envelope_v3',profiles=self.profiles)

@@ -17,6 +17,7 @@ from .resource_policy import ResourcePolicy
 from .dispatch import duration_seconds,route,priority,deduplicate
 from .memory_learning import MemoryLearning
 from .memory_queue import MemoryQueue,pressure,victim as memory_victim
+from .stage_memory import StageMemory
 from .contract import DEFAULT_FOOT_CONTACT, conversion_contract
 from .dispatch import pipeline_stages,use_unified
 
@@ -31,12 +32,13 @@ def child(connection,options):
     if options.get('dynamic'):res.lower_priority()
     from . import cli,model_cache
     cli._FROZEN_IDENTITY=options['identity']
-    model_cache.enable(options['model'])
-    _worker(connection)
+    _worker(connection,initialize=lambda:model_cache.enable(options['model']))
 
 class Slot(Worker):
+    supports_stage_memory=True
     def __init__(self,options):
         super().__init__();self.options=options;self.jobs=0;self.started=0.;self.timeout=0.;self.telemetry={};self.phase_peaks={}
+        self.memory_request=None;self.wait_started=None;self.waited_s=0.
     @property
     def pid(self):return self.process.pid if self.process is not None else None
     def start(self,job,timeout):
@@ -45,23 +47,35 @@ class Slot(Worker):
             self.process=ctx.Process(target=child,args=(child_conn,self.options),daemon=True)
             self.process.start();child_conn.close()
         self.started=time.monotonic();self.timeout=timeout;self.connection.send(job)
+        self.memory_request=None;self.wait_started=None;self.waited_s=0.
         self.phase_peaks={};self.telemetry=dict(phase='starting',stage='loading',compile_possible=job['arguments']['mode']!='v8' and not job['arguments'].get('require_initial_reuse',False),cache_state=self.telemetry.get('cache_state','pure'))
     def close(self):
         super().close()
         self.jobs=0;self.telemetry={};self.phase_peaks={}
+        self.memory_request=None;self.wait_started=None;self.waited_s=0.
+
+    def memory_wait_s(self):
+        return self.waited_s+(time.monotonic()-self.wait_started if self.wait_started is not None else 0.)
+
+    def grant_memory(self):
+        self.connection.send(dict(memory_grant=True))
+        if self.wait_started is not None:self.waited_s+=time.monotonic()-self.wait_started
+        self.memory_request=None;self.wait_started=None
 
     def poll(self):
         while self.connection.poll(0):
             try:
                 result=self.connection.recv()
+                if 'memory_request' in result:
+                    self.memory_request=result['memory_request'];self.wait_started=time.monotonic();continue
                 if 'resource_event' in result:
                     event=result['resource_event'];key=(event['phase'] if event['phase'] in ('ik_prepare','ik_compile','waiting_compile') else event.get('stage',event['phase']))+'|'+event['cache_state']
                     self.phase_peaks[key]=max(self.phase_peaks.get(key,0),event['pss_bytes']);self.telemetry=event;continue
-                result['worker_wall_s']=time.monotonic()-self.started;self.jobs+=1;return result
+                result['worker_wall_s']=time.monotonic()-self.started;result['memory_wait_s']=self.memory_wait_s();self.jobs+=1;return result
             except (EOFError,OSError):
                 self.process.join(.1);code=self.process.exitcode;self.close()
                 return dict(status='failed',error_type='WorkerExit',exit_code=code,error='Owned worker exited before completing the export')
-        if time.monotonic()-self.started>=self.timeout:
+        if time.monotonic()-self.started-self.memory_wait_s()>=self.timeout:
             self.close();return dict(status='timeout',elapsed_s=time.monotonic()-self.started)
         return None
 
@@ -197,7 +211,7 @@ def _run(args,slot_factory,monitor):
     dynamic=res.dynamic_mode(args)
     from .dynamic_resources import CpuAdmission
     cpu_admission=CpuAdmission(os.sched_getaffinity(0) if hasattr(os,'sched_getaffinity') else range(res.cpu_count()),nworkers) if dynamic else None
-    started=time.monotonic();last_checkpoint=started;loop_seconds=0.;usage={};state='running';phase='prepare';active={};slots=[];last=0.;stopped=False;wait_since=None;last_reason=None
+    started=time.monotonic();last_checkpoint=started;last_heartbeat=started;loop_seconds=0.;usage={};state='running';phase='prepare';active={};slots=[];last=0.;stopped=False;wait_since=None;last_reason=None
     records=[dict(case=c['id'],status='pending',attempts=[],selected_mode=None,selected_output=None,training_npz=None) for c in cases]
     snapshot=static_identity();previous=None
     learning=MemoryLearning(res.state_root(),dict(identity=snapshot,execution=dict(
@@ -209,6 +223,7 @@ def _run(args,slot_factory,monitor):
     frames={};durations={};routes={};snap=monitor();priority_wait=None;observed=dict(max_active_workers=0,worker_pss_peak_bytes=0,total_worker_pss_peak_bytes=0,scope_usage_peak_bytes=0)
     queue=[]
     memory_queue=MemoryQueue(nworkers,(previous or {}).get('resources',{}).get('memory_queue'))
+    stage_memory=StageMemory() if getattr(args,'profile',None) in ('fast','refine') else None
     oom_kills=snap.get('cgroup_oom_kills',0)
     policy=dict(workers=nworkers,jit_compilers=1,memory_reserve_gib=reserve/res.GIB,
         resource_mode='dynamic' if dynamic else 'manual',memory_target_percent=getattr(args,'memory_target_percent',None),priority_lowered=priority_lowered,
@@ -229,7 +244,7 @@ def _run(args,slot_factory,monitor):
     for sig in (signal.SIGINT,signal.SIGTERM):previous_handlers[sig]=signal.signal(sig,on_signal)
 
     def save(full=True):
-        nonlocal last,last_checkpoint
+        nonlocal last,last_checkpoint,last_heartbeat
         policy['worker_pool']=dict(policy='retain_warm_until_actual_pressure_v1',fixed_job_recycle=False,
             counters=dict(pool_stats),resident_idle=sum(s not in active and bool(s.pid) for s in slots),
             maximum_jobs_in_resident=max((getattr(s,'jobs',0) for s in slots),default=0))
@@ -238,6 +253,7 @@ def _run(args,slot_factory,monitor):
         policy['memory_reserve_gib']=reserve/res.GIB
         policy['memory_learning']=learning.report()
         policy['memory_queue']=memory_queue.report()
+        if stage_memory:policy['stage_memory']=stage_memory.report(active)
         if cpu_admission:
             measured=cpu_admission.report()
             policy['cpu_admission']=dict(measured,load_based_target_ignored=measured.get('target_workers'),
@@ -264,8 +280,14 @@ def _run(args,slot_factory,monitor):
             worker_pss_bytes=sum(measured),scheduler_loop_s=loop_seconds,
             checkpoint_interval_s=30.,checkpoint_age_s=now-last_checkpoint,
             queued=len(queue),
+            runnable=sum(getattr(s,'memory_request',None) is None for s in active),
+            waiting_memory=sum(getattr(s,'memory_request',None) is not None for s in active),
             active=[dict(case=records[v['index']]['case'],mode=v['mode'],pid=s.pid,
                 estimated_peak_bytes=v['peak'],pss_bytes=usage.get(s,0),
+                memory_state='waiting' if getattr(s,'memory_request',None) is not None else 'running',
+                granted_peak_bytes=v.get('grant',v['peak']),completion_peak_bytes=v.get('completion_peak',v['peak']),
+                requested_peak_bytes=v.get('requested_peak'),
+                memory_wait_s=s.memory_wait_s() if hasattr(s,'memory_wait_s') else 0.,
                 telemetry=getattr(s,'telemetry',{})) for s,v in active.items()])
         if full:
             accepted=[]
@@ -280,6 +302,10 @@ def _run(args,slot_factory,monitor):
             last_checkpoint=time.monotonic()
             live['checkpoint_age_s']=0.
         atomic_json(out/'batch.running.json',live)
+        if now-last_heartbeat>=30:
+            done=sum(r['status'] in ('accepted','review') for r in records)
+            print(f"[batch] running={live['runnable']} waiting_memory={live['waiting_memory']} queued={live['queued']} done={done}/{len(records)}",flush=True)
+            last_heartbeat=now
         last=time.monotonic()
 
     def abort(reason):
@@ -320,6 +346,11 @@ def _run(args,slot_factory,monitor):
             del active[slot];enqueue(i,mode)
             print(cases[i]['id'],mode,'memory_retry',reason,flush=True)
             save()
+        completion_lengths={}
+        for i,route_modes in routes.items():
+            for mode in route_modes:
+                key=(mode,cases[i]['source'])
+                completion_lengths[key]=max(completion_lengths.get(key,0),frames[i])
         for i,r in enumerate(records):
             if r['status'] in ('accepted','input_error','review','failed') or r.get('escalation',{}).get('stop'):continue
             for mode in routes[i]:
@@ -329,6 +360,12 @@ def _run(args,slot_factory,monitor):
             loop_started=time.monotonic()
             admission.reload()
             learning.enabled=admission.value.get('memory_learning',not getattr(args,'no_memory_learning',False))
+            if stage_memory:
+                for (mode,source),length in completion_lengths.items():
+                    predicted=max(admission.completion_peak(mode,length),learning.predict(mode,source,'jax_hot',length,admission))
+                    predicted=memory_queue.peak(mode,source,length,admission.value['stages'][mode]['bytes_per_output_frame'],predicted)
+                    stage_memory.bound=max(stage_memory.bound,predicted)
+                for item in active.values():item['completion_peak']=max(item['completion_peak'],stage_memory.bound)
             modes={v['mode'] for v in active.values()} or {entry[3] for entry in queue}
             phase=next(iter(modes)) if len(modes)==1 else 'mixed'
             snap=monitor()
@@ -364,6 +401,7 @@ def _run(args,slot_factory,monitor):
             # sweep for every admission and report; never rescan all workers
             # once per newly filled slot (the old O(workers squared) hot path).
             usage={s:res.process_memory(s.pid) for s in slots}
+            if stage_memory:stage_memory.elect(active,usage)
             for slot,item in active.items():
                 learning.observe(slot,item,usage.get(slot,0))
                 i=item['index'];mode=item['mode']
@@ -372,7 +410,10 @@ def _run(args,slot_factory,monitor):
                 # lifecycle rather than release a supposedly finished stage.
                 estimate=learning.predict(mode,cases[i]['source'],getattr(slot,'telemetry',{}).get('cache_state','pure'),frames[i],admission,reuse=item.get('reuse',False))
                 estimate=max(estimate,int(item['observed_peak']*1.1)+128*res.MIB)
-                item['peak']=memory_queue.peak(mode,cases[i]['source'],frames[i],admission.value['stages'][mode]['bytes_per_output_frame'],estimate)
+                if stage_memory:
+                    item['completion_peak']=max(item['completion_peak'],admission.completion_peak(mode,frames[i]),estimate)
+                    item['peak']=item['grant']
+                else:item['peak']=memory_queue.peak(mode,cases[i]['source'],frames[i],admission.value['stages'][mode]['bytes_per_output_frame'],estimate)
             snap=monitor()
             victim=res.reclaim_idle(slots,active,usage,snap,reserve)
             if victim is not None:
@@ -382,12 +423,49 @@ def _run(args,slot_factory,monitor):
             critical,waiting=pressure(snap,reserve)
             if critical and active:
                 last_reason='memory_pressure_requeue';priority_wait=None
-                slot=memory_victim(active,usage)
+                slot=memory_victim(active,usage,stage_memory.protected if stage_memory else None)
                 defer(slot,active[slot],last_reason)
                 # Never credit released pages until a fresh snapshot/PSS sweep.
                 continue
             if waiting:
                 last_reason='memory_pressure_wait';priority_wait=None
+            # Workers request before allocating the next stage and before
+            # acquiring shared locks. Existing growth has priority over starts.
+            if stage_memory:
+                shared=admission.shared([v['mode'] for v in active.values()])
+                for slot,item in active.items():
+                    request=getattr(slot,'memory_request',None)
+                    if request is None:continue
+                    i=item['index'];mode=item['mode'];stage=request.get('stage','loading')
+                    estimate=learning.stage_peak(mode,cases[i]['source'],request.get('cache_state','pure'),frames[i],admission,stage)
+                    estimate=max(estimate,learning.predict(mode,cases[i]['source'],request.get('cache_state','pure'),frames[i],admission),request.get('required_peak_bytes',0))
+                    estimate=max(estimate,int(max(usage.get(slot,0),request.get('pss_bytes',0))*1.1)+128*res.MIB)
+                    estimate=memory_queue.peak(mode,cases[i]['source'],frames[i],admission.value['stages'][mode]['bytes_per_output_frame'],estimate)
+                    stage_memory.request(slot,item,estimate,stage,retained=usage.get(slot,request.get('pss_bytes',0)))
+                for item in active.values():item['completion_peak']=max(item['completion_peak'],stage_memory.bound)
+                for slot in stage_memory.ordered(active):
+                    item=active[slot]
+                    if not stage_memory.can_grant(slot,item,snap,reserve,active,usage,shared):continue
+                    stage_memory.grant(slot,item)
+                    measured=monitor()
+                    for key in ('available','cgroup_headroom'):snap[key]=min(snap[key],measured[key])
+                blocked=stage_memory.ordered(active)
+                if blocked:
+                    last_reason='stage_memory_wait';priority_wait=None
+                    # A finished hot process still owns RAM. Reclaim it when
+                    # it prevents the protected worker from receiving its grant.
+                    owner=stage_memory.protected
+                    if owner in blocked:
+                        others=sum(max(0,p-u) for p,u in stage_memory.running(active,usage,owner))
+                        idle=res.reclaim_idle(slots,active,usage,snap,reserve,owner,active[owner]['completion_peak'],shared+others)
+                        if idle is not None:
+                            idle.close();pool_stats['pressure_recycles']+=1;continue
+                    # If estimates were violated and everyone is blocked,
+                    # release one non-protected attempt instead of deadlocking.
+                    if len(blocked)==len(active) and len(active)>1:
+                        slot=memory_victim(active,usage,owner)
+                        defer(slot,active[slot],'stage_budget_underestimate');continue
+                waiting=waiting or bool(blocked)
             # Do not credit reclaimed pages again while using this sweep's PSS.
             burst_headroom={k:snap[k] for k in ('available','cgroup_headroom')}
             dispatch_limit=min(admission.value['workers'],nworkers,memory_queue.limit)
@@ -405,26 +483,28 @@ def _run(args,slot_factory,monitor):
                 # required reserve instead of immediately consuming it again.
                 for _,_,index,mode in queue[:1]:
                     cache=getattr(idle,'telemetry',{}).get('cache_state','pure') if idle and idle.pid else 'pure'
-                    if (learning.enabled and getattr(args,'profile',None) in ('fast','refine')
-                            and not learning.calibrated(mode,cases[index]['source'],cache)
-                            and any(v['mode']==mode and cases[v['index']]['source']==cases[index]['source'] for v in active.values())):
-                        last_reason='memory_calibration_wait';priority_wait=None;break
                     reuse_possible=False
                     peak=learning.predict(mode,cases[index]['source'],cache,frames[index],admission,reuse=reuse_possible)
                     peak=memory_queue.peak(mode,cases[index]['source'],frames[index],admission.value['stages'][mode]['bytes_per_output_frame'],peak)
+                    completion=max(peak,admission.completion_peak(mode,frames[index]),learning.predict(mode,cases[index]['source'],cache,frames[index],admission))
+                    if stage_memory:completion=max(completion,stage_memory.bound)
                     compiling=[(v['mode'],cases[v['index']]['source']) for s,v in active.items()
                         if getattr(s,'telemetry',{}).get('compile_possible',v['mode']!='v8')]
                     if mode!='v8' and not reuse_possible:compiling.append((mode,cases[index]['source']))
                     shared=max((learning.compiler_extra(m,source,admission) for m,source in compiling),default=0)
-                    allowed,reason=res.can_admit(snap,reserve,free,disk_floor,running,peak,usage.get(idle,0),shared)
+                    if stage_memory:shared=max(shared,admission.shared([mode]+[v['mode'] for v in active.values()]))
+                    if stage_memory:
+                        allowed=stage_memory.can_start(snap,reserve,active,usage,peak,completion,usage.get(idle,0),shared)
+                        reason=None if allowed else 'memory_reserve'
+                    else:allowed,reason=res.can_admit(snap,reserve,free,disk_floor,running,peak,usage.get(idle,0),shared)
                     if allowed:chosen=(index,mode,peak);break
                     last_reason='priority_head_wait:'+reason
                     priority_wait=dict(case=cases[index]['id'],mode=mode,duration_s=float(durations[index]),
-                        candidate_peak_bytes=peak,compiler_reserve_bytes=shared,
+                        candidate_peak_bytes=completion if stage_memory and stage_memory.protected is None else peak,
+                        normal_stage_peak_bytes=peak,completion_peak_bytes=completion,compiler_reserve_bytes=shared,
                         inflight_growth_bytes=sum(max(0,p-u) for p,u in running),
                         available_headroom_bytes=min(snap['available']-reserve,snap['cgroup_headroom']))
                 if chosen is None:
-                    if last_reason=='memory_calibration_wait':break
                     victim=res.reclaim_idle(slots,active,usage,snap,reserve,idle,peak,shared)
                     if victim is not None:
                         victim.close();pool_stats['pressure_recycles']+=1
@@ -445,8 +525,10 @@ def _run(args,slot_factory,monitor):
                     if old_log.exists():old_log.rename(old_log.with_name(old_log.name+'.interrupted.'+str(time.time_ns())))
                 reuse=None
                 arguments=dict(bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'),foot_contact=getattr(args,'foot_contact',DEFAULT_FOOT_CONTACT),input=c['input'],output=str(folder),source=c['source'],mode=mode,iterations=args.iterations,initial_iterations=args.initial_iterations,max_frames=None,legacy_frax=False,reuse_initial_from=reuse,require_initial_reuse=reuse is not None,pipeline=getattr(args,'pipeline','unified'),unified_repair=use_unified(args),repair_similarity=getattr(args,'repair_similarity','soft'),profile=getattr(args,'profile',None),repair_budget=getattr(args,'repair_budget',None),allow_local_slowdown=getattr(args,'allow_local_slowdown',False),resume_recheck=getattr(args,'resume_recheck',False))
-                job=dict(input=c['input'],input_sha256=c['input_sha256'],log=str(folder.parent/(mode+'.log') if args.mode=='auto' else out/(c['id']+'.log')),arguments=arguments)
-                active[idle]=dict(index=i,mode=mode,folder=folder,peak=peak,reuse=reuse is not None)
+                job=dict(input=c['input'],input_sha256=c['input_sha256'],log=str(folder.parent/(mode+'.log') if args.mode=='auto' else out/(c['id']+'.log')),arguments=arguments,
+                    stage_memory=bool(stage_memory and getattr(idle,'supports_stage_memory',False)))
+                active[idle]=dict(index=i,case=c['id'],mode=mode,folder=folder,peak=peak,grant=peak,completion_peak=completion,reuse=reuse is not None)
+                if stage_memory:stage_memory.register(idle,active[idle])
                 pool_stats['resident_reuses' if idle.pid else 'process_starts']+=1
                 idle.start(job,min(timeout_for(args,mode,frames[i]),max(.01,args.budget-(time.monotonic()-started))))
                 snap=monitor()
