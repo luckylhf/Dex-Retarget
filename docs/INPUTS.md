@@ -33,8 +33,13 @@ BVH 默认使用厘米及 `absolute` 位置通道，文件本身通常不声明�
 
 推荐显式指定来源。`mocap` 不表示支持任意 BVH；新的关节命名、局部轴或骨架拓扑需要先适配。
 
-LAFAN/SOMA 的参考几何表不随 Git 或 wheel 分发。合法取得后放入
-`src/dex_frax/v8/reference/`；来源与许可见 [SOURCE_GEOMETRY.md](../src/dex_frax/v8/reference/SOURCE_GEOMETRY.md)。仓库没有从原始 FBX/USD 生成这些表的工具，未备齐时不能直接运行对应来源。nobody 示例和 SMPL-X 入口不需要这两张表。
+LAFAN/SOMA 的参考几何表不随 Git 或 wheel 分发。合法取得后，源码安装放入 `src/dex_frax/v8/reference/`；wheel 安装放入实际安装包的 `reference/` 目录，可用以下命令查看该位置：
+
+```sh
+.venv/bin/python -c "from pathlib import Path; import dex_frax.v8; print(Path(dex_frax.v8.__file__).parent / 'reference')"
+```
+
+来源与许可见 [SOURCE_GEOMETRY.md](../src/dex_frax/v8/reference/SOURCE_GEOMETRY.md)。仓库没有从原始 FBX/USD 生成这些表的工具，未备齐时不能直接运行对应来源。请在启动任务前放好文件，运行中不要替换。nobody 示例和 SMPL-X 入口不需要这两张表。
 
 ```sh
 .venv/bin/dex-frax convert /path/to/walk.bvh outputs/walk --source lafan
@@ -163,7 +168,7 @@ body_models/
 
 ## 输出格式
 
-每条完成动作的输出结构为：
+单文件 `convert` 完成后的输出结构为：
 
 ```text
 outputs/motion/
@@ -176,6 +181,8 @@ outputs/motion/
     ├── identity.json
     └── run.json
 ```
+
+`batch` 在输出根目录保存 `batch.json`、`batch.running.json` 和整批的 `accepted.json`；每条动作位于 `<id>/`，其中有 `selection.json`、`frax.log` 和 `frax/`。读取训练路径时始终以对应 `accepted.json` 所在的输出根目录为基准，批次状态与单条执行状态见[批处理说明](BATCH.md#查看进度与结果)。
 
 | 文件 | 内容 |
 |---|---|
