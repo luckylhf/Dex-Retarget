@@ -2,7 +2,7 @@
 
 将人体动作转换为 **Dex 29 关节、50 Hz 的机器人运动学参考**，用于动作预览和训练数据准备。支持已适配的 BVH 骨架及 SMPL-X 人体参数（`.pt`、`.npz`、`.pkl`）。
 
-当前版本为 **0.8.3**。版本与验证结果见 [CURRENT_VERSION.md](docs/CURRENT_VERSION.md)。
+当前版本为 **0.8.4**。版本与验证结果见 [CURRENT_VERSION.md](docs/CURRENT_VERSION.md)。
 
 ## 安装
 
